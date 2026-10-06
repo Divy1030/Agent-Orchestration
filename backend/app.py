@@ -6,10 +6,14 @@ from typing import Any
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from backend.flow_schema import DEMO_FLOW, FlowValidationError, canvas_graph, validate_flow
+from backend.runtime import FlowRuntime, SessionStore
+from backend.agent_executor import OpenRouterExecutor
+from backend.auth_models import FlowSaveRequest, LoginRequest, RegisterRequest, ResourceRequest, SessionCreateRequest, WorkspaceRequest
+from backend.mongo_store import MongoRuntimeStore, MongoStore, verify_password
 
 load_dotenv()
 
@@ -18,6 +22,8 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 FLOW = validate_flow(DEMO_FLOW)
 GRAPH = canvas_graph(FLOW)
+mongo = MongoStore()
+runtime = FlowRuntime(MongoRuntimeStore(mongo) if mongo.configured else SessionStore(os.getenv("ORCHESTRATION_DB_PATH", "data/orchestration.db")), agent_executor=OpenRouterExecutor().execute)
 
 
 class RunRequest(BaseModel):
@@ -28,6 +34,29 @@ class RunRequest(BaseModel):
 
 class ValidateRequest(BaseModel):
     flow: dict[str, Any]
+
+
+class MessageRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+
+
+def require_mongo() -> MongoStore:
+    if not mongo.configured:
+        raise HTTPException(503, "MONGODB_URI is not configured")
+    try:
+        mongo.db.command("ping")
+    except Exception as exc:
+        raise HTTPException(503, "MongoDB is unavailable. Start MongoDB or set MONGODB_URI to a reachable database.") from exc
+    return mongo
+
+
+def current_user(request: Request) -> dict[str, Any]:
+    store = require_mongo()
+    token = request.cookies.get(os.getenv("AUTH_COOKIE_NAME", "ao_session"))
+    user = store.user_by_session(token) if token else None
+    if not user:
+        raise HTTPException(401, "Authentication required")
+    return user
 
 
 def jev_url() -> str:
@@ -69,6 +98,153 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.post("/api/auth/register")
+def register(request: RegisterRequest, response: Response) -> dict[str, Any]:
+    store = require_mongo()
+    try:
+        user = store.create_user(request.email, request.password, request.name)
+        store.create_workspace(user["id"], request.workspace_name)
+        token = store.issue_session(user["id"])
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+    response.set_cookie(os.getenv("AUTH_COOKIE_NAME", "ao_session"), token, httponly=True, secure=os.getenv("AUTH_COOKIE_SECURE", "false").lower() == "true", samesite="lax", max_age=7 * 86400)
+    return {"user": user}
+
+
+@app.post("/api/auth/login")
+def login(request: LoginRequest, response: Response) -> dict[str, Any]:
+    store = require_mongo()
+    user = store.user_for_login(request.email)
+    if not user or not verify_password(request.password, user["password_hash"]):
+        raise HTTPException(401, "Invalid email or password")
+    token = store.issue_session(user["id"])
+    response.set_cookie(os.getenv("AUTH_COOKIE_NAME", "ao_session"), token, httponly=True, secure=os.getenv("AUTH_COOKIE_SECURE", "false").lower() == "true", samesite="lax", max_age=7 * 86400)
+    return {"user": store.public_user(user)}
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request, response: Response) -> dict[str, bool]:
+    store = require_mongo()
+    name = os.getenv("AUTH_COOKIE_NAME", "ao_session")
+    token = request.cookies.get(name)
+    if token:
+        store.revoke_session(token)
+    response.delete_cookie(name)
+    return {"ok": True}
+
+
+@app.get("/api/auth/me")
+def me(request: Request) -> dict[str, Any]:
+    return {"user": current_user(request)}
+
+
+@app.get("/api/workspaces")
+def list_workspaces(request: Request) -> dict[str, Any]:
+    user = current_user(request)
+    return {"workspaces": mongo.workspaces_for_user(user["id"])}
+
+
+@app.post("/api/workspaces")
+def create_workspace(request: WorkspaceRequest, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    return {"workspace": mongo.create_workspace(user["id"], request.name)}
+
+
+@app.post("/api/workspaces/{workspace_id}/flows")
+def create_flow(workspace_id: str, request: FlowSaveRequest, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        validated = validate_flow(request.flow)
+        return {"flow": mongo.create_flow(user["id"], workspace_id, validated)}
+    except FlowValidationError as exc:
+        raise HTTPException(422, {"message": str(exc), "errors": exc.errors})
+
+
+@app.post("/api/flows/{flow_id}/versions")
+def save_flow_version(flow_id: str, request: FlowSaveRequest, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        validated = validate_flow(request.flow)
+        return {"version": mongo.save_flow_version(user["id"], flow_id, validated)}
+    except FlowValidationError as exc:
+        raise HTTPException(422, {"message": str(exc), "errors": exc.errors})
+
+
+@app.get("/api/workspaces/{workspace_id}/flows")
+def list_flows(workspace_id: str, request: Request) -> dict[str, Any]:
+    user = current_user(request)
+    try:
+        return {"flows": mongo.list_flows(user["id"], workspace_id)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc))
+
+
+@app.get("/api/flows/{flow_id}")
+def get_flow(flow_id: str, request: Request) -> dict[str, Any]:
+    user = current_user(request)
+    try:
+        flow = mongo.get_flow(user["id"], flow_id)
+        if not flow:
+            raise HTTPException(404, "Flow not found")
+        flow["graph"] = canvas_graph(flow["flow"])
+        return flow
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc))
+
+
+@app.get("/api/flows/{flow_id}/versions")
+def list_flow_versions(flow_id: str, request: Request) -> dict[str, Any]:
+    user = current_user(request)
+    try:
+        return {"versions": mongo.list_flow_versions(user["id"], flow_id)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc))
+
+
+@app.post("/api/flows/{flow_id}/publish")
+def publish_flow(flow_id: str, request: Request) -> dict[str, Any]:
+    user = current_user(request)
+    try:
+        return {"flow": mongo.publish_flow(user["id"], flow_id)}
+    except (PermissionError, ValueError) as exc:
+        raise HTTPException(422, str(exc))
+
+
+@app.post("/api/flows/{flow_id}/unpublish")
+def unpublish_flow(flow_id: str, request: Request) -> dict[str, Any]:
+    user = current_user(request)
+    try:
+        return {"flow": mongo.unpublish_flow(user["id"], flow_id)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc))
+
+
+def resource_endpoints(collection: str, resource_name: str):
+    @app.get(f"/api/workspaces/{{workspace_id}}/{resource_name}")
+    def list_resource(workspace_id: str, request: Request) -> dict[str, Any]:
+        user = current_user(request)
+        try:
+            return {resource_name: mongo.list_resources(user["id"], workspace_id, collection)}
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc))
+
+    @app.post(f"/api/workspaces/{{workspace_id}}/{resource_name}")
+    def create_resource(workspace_id: str, payload: ResourceRequest, request: Request) -> dict[str, Any]:
+        user = current_user(request)
+        try:
+            payload_data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+            return {resource_name[:-1]: mongo.create_resource(user["id"], workspace_id, collection, payload_data)}
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc))
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+
+
+resource_endpoints("tools", "tools")
+resource_endpoints("connectors", "connectors")
+resource_endpoints("credential_refs", "credential-refs")
+
+
 @app.get("/api/graph")
 def graph() -> dict[str, Any]:
     return deepcopy(GRAPH)
@@ -86,6 +262,40 @@ def validate_flow_endpoint(request: ValidateRequest) -> dict[str, Any]:
     except FlowValidationError as exc:
         raise HTTPException(422, detail={"message": str(exc), "errors": exc.errors})
     return {"valid": True, "flow_id": validated["id"], "version": validated["version"]}
+
+
+async def runtime_route(flow: dict[str, Any], node_id: str, message: str, history: list[dict[str, str]]) -> dict[str, Any]:
+    return await choose_edge(canvas_graph(flow), node_id, message, history)
+
+
+@app.post("/api/sessions")
+async def create_session(request: SessionCreateRequest, http_request: Request) -> dict[str, Any]:
+    flow = FLOW
+    if request.flow_id:
+        user = current_user(http_request)
+        try:
+            flow = validate_flow(mongo.published_flow(user["id"], request.flow_id))
+        except (PermissionError, ValueError) as exc:
+            raise HTTPException(422, str(exc))
+    session = await runtime.start(flow)
+    return {"session_id": session["id"], "flow_id": session["flow_id"], "flow_version": session["flow_version"],
+            "status": session["status"], "current_node": session["current_node"]}
+
+
+@app.get("/api/sessions/{session_id}")
+def get_session(session_id: str) -> dict[str, Any]:
+    session = runtime.store.get(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+    return session
+
+
+@app.post("/api/sessions/{session_id}/messages")
+async def send_session_message(session_id: str, request: MessageRequest) -> dict[str, Any]:
+    try:
+        return await runtime.turn(FLOW, session_id, request.message, runtime_route)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
 
 @app.post("/api/run")
