@@ -138,8 +138,11 @@ class MongoStore:
         from bson import ObjectId
         if not self.is_member(user_id, workspace_id):
             raise PermissionError("Workspace access denied")
-        return [{"id": str(row["_id"]), "slug": row["slug"], "name": row["name"], "version": row.get("current_version", 1), "status": row.get("status", "draft"), "published_version": row.get("published_version"), "updated_at": row.get("updated_at")}
-                for row in self.db.flows.find({"workspace_id": ObjectId(workspace_id)}).sort("updated_at", -1)]
+        result = []
+        for row in self.db.flows.find({"workspace_id": ObjectId(workspace_id)}).sort("updated_at", -1):
+            version = self.db.flow_versions.find_one({"flow_id": row["_id"], "version": row.get("current_version", 1)})
+            result.append({"id": str(row["_id"]), "slug": row["slug"], "name": row["name"], "version": row.get("current_version", 1), "status": row.get("status", "draft"), "published_version": row.get("published_version"), "agent_id": (version or {}).get("flow", {}).get("agent_id"), "updated_at": row.get("updated_at")})
+        return result
 
     def get_flow(self, user_id: str, flow_id: str) -> dict[str, Any] | None:
         from bson import ObjectId
@@ -176,6 +179,23 @@ class MongoStore:
         self.db.flows.update_one({"_id": ObjectId(flow_id)}, {"$set": {"status": "draft", "updated_at": now()}})
         return {"flow_id": flow_id, "status": "draft"}
 
+    def pause_flow(self, user_id: str, flow_id: str) -> dict[str, Any]:
+        from bson import ObjectId
+        flow = self.db.flows.find_one({"_id": ObjectId(flow_id)})
+        if not flow or not self.is_member(user_id, str(flow["workspace_id"])):
+            raise PermissionError("Flow access denied")
+        self.db.flows.update_one({"_id": ObjectId(flow_id)}, {"$set": {"status": "paused", "updated_at": now()}})
+        return {"flow_id": flow_id, "status": "paused"}
+
+    def delete_flow(self, user_id: str, flow_id: str) -> None:
+        from bson import ObjectId
+        flow = self.db.flows.find_one({"_id": ObjectId(flow_id)})
+        if not flow or not self.is_member(user_id, str(flow["workspace_id"])):
+            raise PermissionError("Flow access denied")
+        self.db.flow_versions.delete_many({"flow_id": ObjectId(flow_id)})
+        self.db.runtime_sessions.delete_many({"flow_id": flow_id})
+        self.db.flows.delete_one({"_id": ObjectId(flow_id)})
+
     def published_flow(self, user_id: str, flow_id: str) -> dict[str, Any]:
         from bson import ObjectId
         flow = self.db.flows.find_one({"_id": ObjectId(flow_id), "status": "published"})
@@ -206,18 +226,89 @@ class MongoStore:
         from bson import ObjectId
         if not self.is_member(user_id, workspace_id):
             raise PermissionError("Workspace access denied")
+        name = str(request.get("name", "")).strip()
+        if not name:
+            raise ValueError("Name is required")
         if any(key.lower() in {"secret", "token", "password", "api_key", "private_key"} for key in request.get("config", {})):
             raise ValueError("Secrets must be stored outside resource configuration")
-        doc = {"workspace_id": ObjectId(workspace_id), "name": request["name"], "description": request.get("description", ""), "config": request.get("config", {}), "created_by": ObjectId(user_id), "created_at": now(), "updated_at": now()}
+        doc = {"workspace_id": ObjectId(workspace_id), "name": name, "description": request.get("description", ""), "config": request.get("config", {}), "created_by": ObjectId(user_id), "created_at": now(), "updated_at": now()}
         result = self.db[collection].insert_one(doc)
         return {"id": str(result.inserted_id), "name": doc["name"], "description": doc["description"], "config": doc["config"]}
+
+    def delete_agent(self, user_id: str, agent_id: str) -> None:
+        from bson import ObjectId
+        try:
+            agent_object_id = ObjectId(agent_id)
+        except Exception as exc:
+            raise ValueError("Agent not found") from exc
+        agent = self.db.agents.find_one({"_id": agent_object_id})
+        if not agent or not self.is_member(user_id, str(agent["workspace_id"])):
+            raise PermissionError("Agent access denied")
+        if self.agent_connections(user_id, agent_id):
+            raise ValueError("Disconnect this agent from all workflows before deleting it")
+        self.db.agents.delete_one({"_id": agent_object_id})
 
     def list_resources(self, user_id: str, workspace_id: str, collection: str) -> list[dict[str, Any]]:
         from bson import ObjectId
         if not self.is_member(user_id, workspace_id):
             raise PermissionError("Workspace access denied")
-        return [{"id": str(row["_id"]), "name": row["name"], "description": row.get("description", ""), "config": row.get("config", {})}
-                for row in self.db[collection].find({"workspace_id": ObjectId(workspace_id)}).sort("name", 1)]
+        connected_counts: dict[str, int] = {}
+        if collection == "agents":
+            for flow in self.db.flows.find({"workspace_id": ObjectId(workspace_id)}):
+                version = self.db.flow_versions.find_one({"flow_id": flow["_id"], "version": flow.get("current_version", 1)})
+                agent_id = (version or {}).get("flow", {}).get("agent_id")
+                if agent_id:
+                    connected_counts[agent_id] = connected_counts.get(agent_id, 0) + 1
+        return [
+            {
+                "id": str(row["_id"]),
+                "name": row["name"],
+                "description": row.get("description", ""),
+                "config": row.get("config", {}),
+                "connected_workflows": connected_counts.get(str(row["_id"]), 0) if collection == "agents" else None,
+            }
+            for row in self.db[collection].find({"workspace_id": ObjectId(workspace_id)}).sort("name", 1)
+        ]
+
+    def agent_connections(self, user_id: str, agent_id: str) -> list[dict[str, Any]]:
+        from bson import ObjectId
+        try:
+            agent = self.db.agents.find_one({"_id": ObjectId(agent_id)})
+        except Exception as exc:
+            raise ValueError("Agent not found") from exc
+        if not agent or not self.is_member(user_id, str(agent["workspace_id"])):
+            raise PermissionError("Agent access denied")
+        connections: list[dict[str, Any]] = []
+        for flow in self.db.flows.find({"workspace_id": agent["workspace_id"]}).sort("updated_at", -1):
+            version = self.db.flow_versions.find_one({"flow_id": flow["_id"], "version": flow.get("current_version", 1)})
+            document = version.get("flow", {}) if version else {}
+            if document.get("agent_id") == agent_id:
+                connections.append({
+                    "flow_id": str(flow["_id"]),
+                    "flow_name": flow.get("name", "Untitled workflow"),
+                    "flow_status": flow.get("status", "draft"),
+                    "flow_version": flow.get("current_version", 1),
+                })
+        return connections
+
+    def set_flow_agent(self, user_id: str, flow_id: str, agent_id: str | None) -> dict[str, Any]:
+        from bson import ObjectId
+        flow_doc = self.db.flows.find_one({"_id": ObjectId(flow_id)})
+        if not flow_doc or not self.is_member(user_id, str(flow_doc["workspace_id"])):
+            raise PermissionError("Flow access denied")
+        if agent_id:
+            agent = self.db.agents.find_one({"_id": ObjectId(agent_id), "workspace_id": flow_doc["workspace_id"]})
+            if not agent:
+                raise ValueError("Agent does not belong to this workspace")
+        version = self.db.flow_versions.find_one({"flow_id": flow_doc["_id"], "version": flow_doc.get("current_version", 1)})
+        if not version:
+            raise ValueError("Flow version is missing")
+        flow = version["flow"]
+        if agent_id:
+            flow["agent_id"] = agent_id
+        else:
+            flow.pop("agent_id", None)
+        return self.save_flow_version(user_id, flow_id, flow)
 
 
 class MongoRuntimeStore:

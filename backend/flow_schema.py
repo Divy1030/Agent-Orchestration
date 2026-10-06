@@ -33,6 +33,8 @@ def validate_flow(flow: Any) -> dict[str, Any]:
         errors.append("version must be a positive integer")
     if not isinstance(flow["goal"], dict) or not isinstance(flow["goal"].get("primary"), str):
         errors.append("goal.primary must be a string")
+    if "agent_id" in flow and flow["agent_id"] is not None and not isinstance(flow["agent_id"], str):
+        errors.append("agent_id must be a string or null")
 
     nodes = flow["nodes"]
     if not isinstance(nodes, list) or not nodes:
@@ -52,6 +54,8 @@ def validate_flow(flow: Any) -> dict[str, Any]:
             continue
         if node_type not in NODE_TYPES:
             errors.append(f"node {node_id}: unsupported type {node_type!r}")
+        if node_type == "agent" and "agent_id" in node.get("config", {}) and not isinstance(node["config"]["agent_id"], str):
+            errors.append(f"node {node_id}: config.agent_id must be a string")
         node_map[node_id] = node
     starts = [node_id for node_id, node in node_map.items() if node.get("type") == "start"]
     ends = [node_id for node_id, node in node_map.items() if node.get("type") == "end"]

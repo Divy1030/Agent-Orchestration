@@ -23,7 +23,24 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 FLOW = validate_flow(DEMO_FLOW)
 GRAPH = canvas_graph(FLOW)
 mongo = MongoStore()
-runtime = FlowRuntime(MongoRuntimeStore(mongo) if mongo.configured else SessionStore(os.getenv("ORCHESTRATION_DB_PATH", "data/orchestration.db")), agent_executor=OpenRouterExecutor().execute)
+openrouter_executor = OpenRouterExecutor()
+
+
+async def execute_agent(node: dict[str, Any], messages: list[dict[str, str]]) -> dict[str, Any]:
+    config = dict(node.get("config", {}))
+    agent_id = config.get("agent_id")
+    if agent_id:
+        from bson import ObjectId
+        agent = mongo.db.agents.find_one({"_id": ObjectId(agent_id)})
+        if not agent:
+            raise ValueError("Connected agent was not found")
+        # Agent documents are the source of truth. Keep only the node fallback
+        # reply locally so a disconnected/renamed agent cannot silently drift.
+        config = {**agent.get("config", {}), "reply": config.get("reply", agent.get("config", {}).get("reply", ""))}
+    return await openrouter_executor.execute({**node, "config": config}, messages)
+
+
+runtime = FlowRuntime(MongoRuntimeStore(mongo) if mongo.configured else SessionStore(os.getenv("ORCHESTRATION_DB_PATH", "data/orchestration.db")), agent_executor=execute_agent)
 
 
 class RunRequest(BaseModel):
@@ -38,6 +55,10 @@ class ValidateRequest(BaseModel):
 
 class MessageRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
+
+
+class AgentConnectionRequest(BaseModel):
+    agent_id: str | None = None
 
 
 def require_mongo() -> MongoStore:
@@ -219,6 +240,37 @@ def unpublish_flow(flow_id: str, request: Request) -> dict[str, Any]:
         raise HTTPException(403, str(exc))
 
 
+@app.post("/api/flows/{flow_id}/pause")
+def pause_flow(flow_id: str, request: Request) -> dict[str, Any]:
+    user = current_user(request)
+    try:
+        return {"flow": mongo.pause_flow(user["id"], flow_id)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc))
+
+
+@app.delete("/api/flows/{flow_id}")
+def delete_flow(flow_id: str, request: Request) -> dict[str, Any]:
+    user = current_user(request)
+    try:
+        mongo.delete_flow(user["id"], flow_id)
+        return {"ok": True}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc))
+
+
+@app.delete("/api/agents/{agent_id}")
+def delete_agent(agent_id: str, request: Request) -> dict[str, Any]:
+    user = current_user(request)
+    try:
+        mongo.delete_agent(user["id"], agent_id)
+        return {"ok": True}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+
 def resource_endpoints(collection: str, resource_name: str):
     @app.get(f"/api/workspaces/{{workspace_id}}/{resource_name}")
     def list_resource(workspace_id: str, request: Request) -> dict[str, Any]:
@@ -244,6 +296,38 @@ resource_endpoints("tools", "tools")
 resource_endpoints("agents", "agents")
 resource_endpoints("connectors", "connectors")
 resource_endpoints("credential_refs", "credential-refs")
+
+
+@app.get("/api/agents/{agent_id}/connections")
+def agent_connections(agent_id: str, request: Request) -> dict[str, Any]:
+    user = current_user(request)
+    try:
+        return {"connections": mongo.agent_connections(user["id"], agent_id)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc))
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+
+
+@app.put("/api/flows/{flow_id}/agent")
+def connect_agent(flow_id: str, payload: AgentConnectionRequest, request: Request) -> dict[str, Any]:
+    user = current_user(request)
+    try:
+        mongo.set_flow_agent(user["id"], flow_id, payload.agent_id)
+        flow = mongo.get_flow(user["id"], flow_id)
+        if not flow:
+            raise HTTPException(404, "Flow not found")
+        flow["graph"] = canvas_graph(flow["flow"])
+        return flow
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+
+@app.delete("/api/flows/{flow_id}/agent")
+def disconnect_agent(flow_id: str, request: Request) -> dict[str, Any]:
+    return connect_agent(flow_id, AgentConnectionRequest(agent_id=None), request)
 
 
 @app.get("/api/graph")
@@ -275,7 +359,11 @@ async def create_session(request: SessionCreateRequest, http_request: Request) -
     if request.flow_id:
         user = current_user(http_request)
         try:
-            flow = validate_flow(mongo.published_flow(user["id"], request.flow_id))
+            flow = deepcopy(mongo.published_flow(user["id"], request.flow_id))
+            # Keep the persisted flow id in the runtime session so later turns
+            # can reload the exact published workflow instead of DEMO_FLOW.
+            flow["id"] = request.flow_id
+            flow = validate_flow(flow)
         except (PermissionError, ValueError) as exc:
             raise HTTPException(422, str(exc))
     session = await runtime.start(flow)
@@ -292,10 +380,17 @@ def get_session(session_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/sessions/{session_id}/messages")
-async def send_session_message(session_id: str, request: MessageRequest) -> dict[str, Any]:
+async def send_session_message(session_id: str, request: MessageRequest, http_request: Request) -> dict[str, Any]:
     try:
-        return await runtime.turn(FLOW, session_id, request.message, runtime_route)
-    except ValueError as exc:
+        session = runtime.store.get(session_id)
+        if not session:
+            raise ValueError("Session not found")
+        flow = FLOW
+        if session.get("flow_id") != FLOW["id"]:
+            user = current_user(http_request)
+            flow = validate_flow(mongo.published_flow(user["id"], session["flow_id"]))
+        return await runtime.turn(flow, session_id, request.message, runtime_route)
+    except (ValueError, RuntimeError) as exc:
         raise HTTPException(400, str(exc))
 
 

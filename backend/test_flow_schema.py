@@ -17,6 +17,11 @@ class FlowSchemaTests(unittest.TestCase):
         with self.assertRaises(FlowValidationError):
             validate_flow(flow)
 
+    def test_agent_connection_id_must_be_a_string(self):
+        flow = {**DEMO_FLOW, "nodes": [{**node, "config": {**node.get("config", {}), "agent_id": 123}} if node["type"] == "agent" else node for node in DEMO_FLOW["nodes"]]}
+        with self.assertRaises(FlowValidationError):
+            validate_flow(flow)
+
 
 if __name__ == "__main__":
     unittest.main()

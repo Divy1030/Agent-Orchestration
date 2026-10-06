@@ -23,6 +23,21 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(saved["current_node"], "answer")
             self.assertEqual(len(saved["trace"]), 2)
 
+    def test_workflow_agent_is_passed_to_agent_nodes(self):
+        seen: list[str] = []
+
+        async def execute_agent(node, messages):
+            seen.append(node["config"]["agent_id"])
+            return {"reply": "workflow agent reply", "provider": "test"}
+
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = FlowRuntime(SessionStore(str(Path(directory) / "runtime.db")), agent_executor=execute_agent)
+            flow = {**DEMO_FLOW, "agent_id": "agent-123"}
+            session = asyncio.run(runtime.start(flow))
+            result = asyncio.run(runtime.turn(flow, session["id"], "hello", first_route))
+            self.assertEqual(result["reply"], "workflow agent reply")
+            self.assertEqual(seen, ["agent-123"])
+
 
 if __name__ == "__main__":
     unittest.main()
