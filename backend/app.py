@@ -241,6 +241,7 @@ def resource_endpoints(collection: str, resource_name: str):
 
 
 resource_endpoints("tools", "tools")
+resource_endpoints("agents", "agents")
 resource_endpoints("connectors", "connectors")
 resource_endpoints("credential_refs", "credential-refs")
 

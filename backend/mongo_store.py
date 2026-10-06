@@ -63,6 +63,7 @@ class MongoStore:
         self._db.auth_sessions.create_index("token_hash", unique=True)
         self._db.auth_sessions.create_index("expires_at", expireAfterSeconds=0)
         self._db.tools.create_index([("workspace_id", 1), ("name", 1)], unique=True)
+        self._db.agents.create_index([("workspace_id", 1), ("name", 1)], unique=True)
         self._db.connectors.create_index([("workspace_id", 1), ("name", 1)], unique=True)
         self._db.credential_refs.create_index([("workspace_id", 1), ("name", 1)], unique=True)
 

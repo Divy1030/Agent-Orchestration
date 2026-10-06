@@ -124,5 +124,5 @@ class FlowRuntime:
         session["trace"].append(transition)
         self.store.trace(session_id, transition)
         self.store.save(session)
-        return {"session_id": session_id, "status": session["status"], "current_node": target,
+        return {"session_id": session_id, "status": session["status"], "source_node": current, "current_node": target,
                 "reply": reply, "decision": decision, "trace": session["trace"][-2:]}

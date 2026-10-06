@@ -150,7 +150,7 @@ DEMO_FLOW = {
     "variables": {},
     "nodes": [
         {"id": "welcome", "type": "start", "label": "Welcome", "config": {"reply": "Welcome. How can I help?"}, "position": {"x": 80, "y": 160}},
-        {"id": "answer", "type": "agent", "label": "Answer", "config": {"reply": "Answer the user's latest request using the available context."}, "position": {"x": 440, "y": 80}},
+        {"id": "answer", "type": "agent", "label": "Answer", "config": {"reply": "Answer the user's latest request using the available context.", "model": "openai/gpt-4o-mini", "system_prompt": "You are a helpful conversational AI agent. Answer clearly and concisely.", "temperature": 0.2, "max_tokens": 300}, "position": {"x": 440, "y": 80}},
         {"id": "finish", "type": "end", "label": "Finish", "config": {"reply": "Goodbye."}, "position": {"x": 800, "y": 260}},
     ],
     "edges": [
@@ -160,4 +160,3 @@ DEMO_FLOW = {
         {"from": "answer", "to": "finish", "key": "finish", "description": "The user wants to end the interaction."},
     ],
 }
-
