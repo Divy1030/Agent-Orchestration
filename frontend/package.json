@@ -1,0 +1,1 @@
+{"scripts":{"dev":"vite --host 0.0.0.0","build":"vite build"},"dependencies":{"@vitejs/plugin-react":"latest","@xyflow/react":"^12.10.0","react":"^19.0.0","react-dom":"^19.0.0","vite":"latest","typescript":"latest"},"devDependencies":{"@types/react":"latest","@types/react-dom":"latest"},"type":"module"}
