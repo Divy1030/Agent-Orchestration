@@ -106,6 +106,12 @@ async def choose_edge(graph: dict[str, Any], node_id: str, message: str, history
             if agent_target:
                 key, route = agent_target
                 return {"ok": True, "choice": key, "target": route["target"], "provider": "mock"}
+        else:
+            self_route = next(((key, route) for key, route in candidates if route["target"] == node_id), None)
+            if self_route:
+                key, route = self_route
+                return {"ok": True, "choice": key, "target": route["target"], "provider": "mock"}
+            return {"ok": True, "choice": "stay", "target": node_id, "provider": "mock"}
         same_agent = next(((key, route) for key, route in candidates if node_map[route["target"]].get("kind") == "agent"), None)
         if same_agent:
             key, route = same_agent
@@ -115,6 +121,9 @@ async def choose_edge(graph: dict[str, Any], node_id: str, message: str, history
     api_key = os.getenv("JEV_API_KEY") or os.getenv("TYPESAFE_API_KEY") or os.getenv("SYSTEM_ONE_API_KEY")
     if not api_key:
         raise HTTPException(503, "JEV_API_KEY is not configured")
+    route_options = dict(routes)
+    if graph["nodes"][node_id].get("kind") == "agent":
+        route_options.setdefault("stay", {"target": node_id, "description": "The user is continuing the current topic; keep the conversation on this agent node."})
     payload = {
         "model": os.getenv("JEV_MODEL", "jev-latest"),
         "state": {"current_node": node_id, "conversation_history": history, "latest_message": message,
@@ -124,7 +133,7 @@ async def choose_edge(graph: dict[str, Any], node_id: str, message: str, history
         "questions": {"next_step": {
             "type": "choice",
             "instructions": "Choose exactly one valid next edge from the latest message and conversation context. Prefer ending when the user explicitly wants to stop. Follow workflow instructions and current-node guidance as operational constraints.",
-            "criteria": {key: route.get("description", "") for key, route in routes.items()},
+            "criteria": {key: route.get("description", "") for key, route in route_options.items()},
         }},
     }
     async with httpx.AsyncClient(timeout=httpx.Timeout(8, connect=3)) as client:
@@ -133,9 +142,9 @@ async def choose_edge(graph: dict[str, Any], node_id: str, message: str, history
     raw = response.json()
     answer = raw.get("answers", {}).get("next_step", {})
     choice = answer.get("choice")
-    if answer.get("type") != "choice" or choice not in routes:
+    if answer.get("type") != "choice" or choice not in route_options:
         raise HTTPException(502, "Jev returned an invalid route choice")
-    return {"ok": True, "choice": choice, "target": routes[choice]["target"], "provider": "jev", "raw": raw}
+    return {"ok": True, "choice": choice, "target": route_options[choice]["target"], "provider": "jev", "raw": raw}
 
 
 @app.get("/api/health")
