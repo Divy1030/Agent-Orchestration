@@ -150,7 +150,7 @@ class MongoStore:
         if not row or not self.is_member(user_id, str(row["workspace_id"])):
             raise PermissionError("Flow access denied")
         version = self.db.flow_versions.find_one({"flow_id": ObjectId(flow_id), "version": row.get("current_version", 1)})
-        return {"id": str(row["_id"]), "workspace_id": str(row["workspace_id"]), "name": row["name"], "version": row.get("current_version", 1), "status": row.get("status", "draft"), "published_version": row.get("published_version"), "flow": version["flow"] if version else None}
+        return {"id": str(row["_id"]), "workspace_id": str(row["workspace_id"]), "name": row["name"], "slug": row["slug"], "version": row.get("current_version", 1), "status": row.get("status", "draft"), "published_version": row.get("published_version"), "flow": version["flow"] if version else None}
 
     def list_flow_versions(self, user_id: str, flow_id: str) -> list[dict[str, Any]]:
         from bson import ObjectId

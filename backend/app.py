@@ -96,10 +96,13 @@ async def choose_edge(graph: dict[str, Any], node_id: str, message: str, history
         raise HTTPException(503, "JEV_API_KEY is not configured")
     payload = {
         "model": os.getenv("JEV_MODEL", "jev-latest"),
-        "state": {"current_node": node_id, "conversation_history": history, "latest_message": message},
+        "state": {"current_node": node_id, "conversation_history": history, "latest_message": message,
+                  "workflow_instructions": graph.get("jev_instructions", ""),
+                  "current_node_instructions": graph["nodes"][node_id].get("instructions", []),
+                  "current_node_routing_instructions": graph["nodes"][node_id].get("routing_instructions", "")},
         "questions": {"next_step": {
             "type": "choice",
-            "instructions": "Choose exactly one valid next edge from the latest message and conversation context. Prefer ending when the user explicitly wants to stop.",
+            "instructions": "Choose exactly one valid next edge from the latest message and conversation context. Prefer ending when the user explicitly wants to stop. Follow workflow instructions and current-node guidance as operational constraints.",
             "criteria": {key: route.get("description", "") for key, route in routes.items()},
         }},
     }

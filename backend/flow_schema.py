@@ -56,6 +56,16 @@ def validate_flow(flow: Any) -> dict[str, Any]:
             errors.append(f"node {node_id}: unsupported type {node_type!r}")
         if node_type == "agent" and "agent_id" in node.get("config", {}) and not isinstance(node["config"]["agent_id"], str):
             errors.append(f"node {node_id}: config.agent_id must be a string")
+        config = node.get("config", {})
+        if not isinstance(config, dict):
+            errors.append(f"node {node_id}: config must be an object")
+        else:
+            instructions = config.get("instructions", [])
+            if not isinstance(instructions, list) or not all(isinstance(item, str) and item.strip() for item in instructions):
+                errors.append(f"node {node_id}: config.instructions must be a list of non-empty strings")
+            for field in ("routing_instructions", "system_prompt"):
+                if field in config and not isinstance(config[field], str):
+                    errors.append(f"node {node_id}: config.{field} must be a string")
         node_map[node_id] = node
     starts = [node_id for node_id, node in node_map.items() if node.get("type") == "start"]
     ends = [node_id for node_id, node in node_map.items() if node.get("type") == "end"]
@@ -137,6 +147,8 @@ def canvas_graph(flow: dict[str, Any]) -> dict[str, Any]:
             "kind": node["type"],
             "action": node["type"],
             "reply": node.get("config", {}).get("reply", ""),
+            "instructions": node.get("config", {}).get("instructions", []),
+            "routing_instructions": node.get("config", {}).get("routing_instructions", ""),
             "routes": routes[node_id],
             "terminal": node["type"] == "end",
         }
@@ -144,6 +156,7 @@ def canvas_graph(flow: dict[str, Any]) -> dict[str, Any]:
         "id": flow["id"], "version": flow["version"], "name": flow["name"],
         "description": flow.get("description", ""), "start_node": next(n["id"] for n in flow["nodes"] if n["type"] == "start"),
         "nodes": nodes, "layout": layout,
+        "jev_instructions": flow.get("jev_instructions", ""),
     }
 
 
@@ -152,6 +165,7 @@ DEMO_FLOW = {
     "description": "A generalized graph where Jev selects the next edge.",
     "goal": {"primary": "complete_conversation", "success_conditions": []},
     "variables": {},
+    "jev_instructions": "Use the latest user message and conversation history. Follow the current node guidance, choose only a declared edge, and stay on the current node when the user is unclear.",
     "nodes": [
         {"id": "welcome", "type": "start", "label": "Welcome", "config": {"reply": "Welcome. How can I help?"}, "position": {"x": 80, "y": 160}},
         {"id": "answer", "type": "agent", "label": "Answer", "config": {"reply": "Answer the user's latest request using the available context.", "model": "openai/gpt-4o-mini", "system_prompt": "You are a helpful conversational AI agent. Answer clearly and concisely.", "temperature": 0.2, "max_tokens": 300}, "position": {"x": 440, "y": 80}},

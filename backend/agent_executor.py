@@ -21,6 +21,18 @@ class OpenRouterExecutor:
             return {"reply": fallback, "provider": "static_fallback", "model": None, "latency_ms": 0, "fallback": True}
 
         system_prompt = str(config.get("system_prompt") or "You are a helpful conversational AI agent. Answer clearly and concisely.")
+        workflow_instructions = str(config.get("workflow_instructions") or "").strip()
+        routing_instructions = str(config.get("routing_instructions") or "").strip()
+        instructions = [str(item).strip() for item in config.get("instructions", []) if str(item).strip()]
+        guidance_sections = []
+        if workflow_instructions:
+            guidance_sections.append(f"Workflow instructions:\n{workflow_instructions}")
+        if routing_instructions:
+            guidance_sections.append(f"Current node routing guidance:\n{routing_instructions}")
+        if instructions:
+            guidance_sections.append("Current node key points:\n" + "\n".join(f"- {item}" for item in instructions))
+        if guidance_sections:
+            system_prompt += "\n\n" + "\n\n".join(guidance_sections)
         request_messages = [{"role": "system", "content": system_prompt}] + [
             {"role": item["role"], "content": item["content"]}
             for item in messages if item.get("role") in {"user", "assistant"}

@@ -107,11 +107,14 @@ class FlowRuntime:
             raise ValueError("Route selected an unknown node")
         session["current_node"] = target
         target_node = nodes[target]
-        if target_node["type"] == "agent" and flow.get("agent_id"):
-            target_node = {
-                **target_node,
-                "config": {**target_node.get("config", {}), "agent_id": flow["agent_id"]},
+        if target_node["type"] == "agent":
+            target_config = {
+                **target_node.get("config", {}),
+                "workflow_instructions": flow.get("jev_instructions", ""),
             }
+            if flow.get("agent_id"):
+                target_config["agent_id"] = flow["agent_id"]
+            target_node = {**target_node, "config": target_config}
         agent_result: dict[str, Any] = {}
         reply = target_node.get("config", {}).get("reply", "")
         if target_node["type"] == "agent" and self.agent_executor:
