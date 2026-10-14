@@ -94,5 +94,5 @@ body { font-weight:500; letter-spacing:-.01em; }
 .editor-canvas-shell,.workflow-test-chat{height:calc(100vh - 160px)!important;min-height:650px}.editor-canvas-shell{margin-bottom:24px}.workflow-test-chat{margin-top:40px!important;margin-bottom:0!important}@media(max-width:760px){.editor-canvas-shell,.workflow-test-chat{height:430px!important;min-height:0}.workflow-test-chat{margin-top:14px!important;margin-bottom:0!important}}
 body.canvas-fullscreen .editor-canvas-shell{height:100vh!important;min-height:0!important;z-index:1000!important}
 body.canvas-fullscreen .app-sidebar,body.canvas-fullscreen .workflow-test-chat{visibility:hidden!important;pointer-events:none!important}
-.workflow-agent-select{height:38px;max-width:245px;border:1px solid var(--line);border-radius:0;background:var(--surface);color:var(--ink);padding:0 10px;font:inherit;font-size:11px;font-weight:600}
+.workflow-agent-select{height:38px;max-width:245px;border:1px solid var(--line);border-radius:0;background:var(--surface);color:var(--ink);padding:0 10px;font:inherit;font-size:11px;font-weight:600;cursor:pointer}
 @media(max-width:760px){.workflow-agent-select{max-width:100%;flex:1;min-width:180px}}
