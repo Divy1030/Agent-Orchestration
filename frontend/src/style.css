@@ -106,6 +106,6 @@ body.canvas-fullscreen .app-sidebar,body.canvas-fullscreen .workflow-test-chat{v
 .delete-node-dialog-button:hover{background:#5a2430!important}
 @media(max-width:760px){.canvas-add-node{top:10px;right:10px}.save-reminder-dialog .dialog-actions{display:grid}}
 .node-add-button{right:-30px}
-.card > .react-flow__handle-right{right:-62px}
+.card > .react-flow__handle-right{right:-40px}
 .node-choice-list .picker-item:first-child strong{font-size:0}
 .node-choice-list .picker-item:first-child strong::after{content:"Node";font-size:12px}
