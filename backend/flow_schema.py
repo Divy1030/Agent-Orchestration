@@ -35,6 +35,8 @@ def validate_flow(flow: Any) -> dict[str, Any]:
         errors.append("goal.primary must be a string")
     if "agent_id" in flow and flow["agent_id"] is not None and not isinstance(flow["agent_id"], str):
         errors.append("agent_id must be a string or null")
+    if "jev_instructions" in flow and not isinstance(flow["jev_instructions"], str):
+        errors.append("jev_instructions must be a string")
 
     nodes = flow["nodes"]
     if not isinstance(nodes, list) or not nodes:
