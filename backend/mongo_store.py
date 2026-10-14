@@ -231,9 +231,28 @@ class MongoStore:
             raise ValueError("Name is required")
         if any(key.lower() in {"secret", "token", "password", "api_key", "private_key"} for key in request.get("config", {})):
             raise ValueError("Secrets must be stored outside resource configuration")
-        doc = {"workspace_id": ObjectId(workspace_id), "name": name, "description": request.get("description", ""), "config": request.get("config", {}), "created_by": ObjectId(user_id), "created_at": now(), "updated_at": now()}
+        doc = {"workspace_id": ObjectId(workspace_id), "name": name, "slug": self._resource_slug(name), "description": request.get("description", ""), "config": request.get("config", {}), "created_by": ObjectId(user_id), "created_at": now(), "updated_at": now()}
         result = self.db[collection].insert_one(doc)
-        return {"id": str(result.inserted_id), "name": doc["name"], "description": doc["description"], "config": doc["config"]}
+        return {"id": str(result.inserted_id), "name": doc["name"], "slug": doc["slug"], "description": doc["description"], "config": doc["config"]}
+
+    @staticmethod
+    def _resource_slug(name: str) -> str:
+        import re
+        return re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", name.lower())).strip("-") or "agent"
+
+    def update_agent(self, user_id: str, agent_id: str, config: dict[str, Any]) -> dict[str, Any]:
+        from bson import ObjectId
+        try:
+            agent_object_id = ObjectId(agent_id)
+        except Exception as exc:
+            raise ValueError("Agent not found") from exc
+        if any(key.lower() in {"secret", "token", "password", "api_key", "private_key"} for key in config):
+            raise ValueError("Secrets must be stored outside resource configuration")
+        agent = self.db.agents.find_one({"_id": agent_object_id})
+        if not agent or not self.is_member(user_id, str(agent["workspace_id"])):
+            raise PermissionError("Agent access denied")
+        self.db.agents.update_one({"_id": agent_object_id}, {"$set": {"config": config, "updated_at": now()}})
+        return {"id": agent_id, "name": agent["name"], "slug": agent.get("slug") or self._resource_slug(agent["name"]), "description": agent.get("description", ""), "config": config}
 
     def delete_agent(self, user_id: str, agent_id: str) -> None:
         from bson import ObjectId
@@ -263,6 +282,7 @@ class MongoStore:
             {
                 "id": str(row["_id"]),
                 "name": row["name"],
+                "slug": row.get("slug") or self._resource_slug(row["name"]),
                 "description": row.get("description", ""),
                 "config": row.get("config", {}),
                 "connected_workflows": connected_counts.get(str(row["_id"]), 0) if collection == "agents" else None,

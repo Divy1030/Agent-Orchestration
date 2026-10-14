@@ -276,6 +276,18 @@ def delete_agent(agent_id: str, request: Request) -> dict[str, Any]:
         raise HTTPException(422, str(exc))
 
 
+@app.put("/api/agents/{agent_id}")
+def update_agent(agent_id: str, payload: ResourceRequest, request: Request) -> dict[str, Any]:
+    user = current_user(request)
+    try:
+        data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+        return {"agent": mongo.update_agent(user["id"], agent_id, data.get("config", {}))}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+
 def resource_endpoints(collection: str, resource_name: str):
     @app.get(f"/api/workspaces/{{workspace_id}}/{resource_name}")
     def list_resource(workspace_id: str, request: Request) -> dict[str, Any]:
