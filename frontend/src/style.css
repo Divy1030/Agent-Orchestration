@@ -101,4 +101,7 @@ body.canvas-fullscreen .app-sidebar,body.canvas-fullscreen .workflow-test-chat{v
 .save-reminder-dialog .dialog-actions{flex-wrap:wrap}
 .node-choice-list{display:grid;gap:10px;margin-top:16px}
 .node-choice-list .picker-item{padding:14px}
+.node-delete-button{position:absolute;z-index:3;top:6px;left:6px;width:22px;height:22px;padding:0;border:1px solid transparent;border-radius:0;background:transparent;color:#f87171;font-size:17px;line-height:1;opacity:0;pointer-events:none}
+.card:hover .node-delete-button{opacity:1;pointer-events:auto}
+.node-delete-button:hover{border-color:#f87171;background:#3b1d28;color:#fecaca}
 @media(max-width:760px){.canvas-add-node{top:10px;right:10px}.save-reminder-dialog .dialog-actions{display:grid}}
