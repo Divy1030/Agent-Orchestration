@@ -18,7 +18,9 @@ class OpenRouterExecutor:
         config = node.get("config", {})
         fallback = str(config.get("reply", ""))
         if not self.api_key:
-            return {"reply": fallback, "provider": "static_fallback", "model": None, "latency_ms": 0, "fallback": True}
+            latest_user_message = next((item.get("content", "").strip() for item in reversed(messages) if item.get("role") == "user"), "")
+            mock_reply = f"I received your question: {latest_user_message}" if latest_user_message else fallback
+            return {"reply": mock_reply or fallback, "provider": "mock_agent", "model": None, "latency_ms": 0, "fallback": True}
 
         system_prompt = str(config.get("system_prompt") or "You are a helpful conversational AI agent. Answer clearly and concisely.")
         workflow_instructions = str(config.get("workflow_instructions") or "").strip()

@@ -91,8 +91,27 @@ async def choose_edge(graph: dict[str, Any], node_id: str, message: str, history
     if not routes:
         return {"ok": True, "choice": None, "target": node_id, "provider": "none"}
     if os.getenv("JEV_MOCK", "true").lower() == "true":
-        key = next(iter(routes))
-        return {"ok": True, "choice": key, "target": routes[key]["target"], "provider": "mock"}
+        normalized = message.lower().strip()
+        farewell = any(term in normalized for term in ("goodbye", "bye", "stop", "quit", "end the conversation", "that's all", "that is all"))
+        node_map = graph["nodes"]
+        candidates = [(key, route) for key, route in routes.items() if route.get("target") in node_map]
+        if farewell:
+            terminal = next(((key, route) for key, route in candidates if node_map[route["target"]].get("terminal") or route["target"] == "end"), None)
+            if terminal:
+                key, route = terminal
+                return {"ok": True, "choice": key, "target": route["target"], "provider": "mock"}
+        current_kind = node_map[node_id].get("kind")
+        if current_kind != "agent":
+            agent_target = next(((key, route) for key, route in candidates if node_map[route["target"]].get("kind") == "agent"), None)
+            if agent_target:
+                key, route = agent_target
+                return {"ok": True, "choice": key, "target": route["target"], "provider": "mock"}
+        same_agent = next(((key, route) for key, route in candidates if node_map[route["target"]].get("kind") == "agent"), None)
+        if same_agent:
+            key, route = same_agent
+        else:
+            key, route = candidates[0]
+        return {"ok": True, "choice": key, "target": route["target"], "provider": "mock"}
     api_key = os.getenv("JEV_API_KEY") or os.getenv("TYPESAFE_API_KEY") or os.getenv("SYSTEM_ONE_API_KEY")
     if not api_key:
         raise HTTPException(503, "JEV_API_KEY is not configured")
