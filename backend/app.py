@@ -395,7 +395,10 @@ async def create_session(request: SessionCreateRequest, http_request: Request) -
     if request.flow_id:
         user = current_user(http_request)
         try:
-            flow = deepcopy(mongo.published_flow(user["id"], request.flow_id))
+            stored_flow = mongo.get_flow(user["id"], request.flow_id)
+            if not stored_flow or not stored_flow.get("flow"):
+                raise ValueError("Workflow version is missing")
+            flow = deepcopy(stored_flow["flow"])
             # Keep the persisted flow id in the runtime session so later turns
             # can reload the exact published workflow instead of DEMO_FLOW.
             flow["id"] = request.flow_id
@@ -424,7 +427,10 @@ async def send_session_message(session_id: str, request: MessageRequest, http_re
         flow = FLOW
         if session.get("flow_id") != FLOW["id"]:
             user = current_user(http_request)
-            flow = validate_flow(mongo.published_flow(user["id"], session["flow_id"]))
+            stored_flow = mongo.get_flow(user["id"], session["flow_id"])
+            if not stored_flow or not stored_flow.get("flow"):
+                raise ValueError("Workflow version is missing")
+            flow = validate_flow(stored_flow["flow"])
         return await runtime.turn(flow, session_id, request.message, runtime_route)
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(400, str(exc))
