@@ -105,3 +105,6 @@ body.canvas-fullscreen .app-sidebar,body.canvas-fullscreen .workflow-test-chat{v
 .delete-node-dialog-button{background:#3b1d28!important;color:#fecaca!important;border:1px solid #f87171!important;border-radius:0!important}
 .delete-node-dialog-button:hover{background:#5a2430!important}
 @media(max-width:760px){.canvas-add-node{top:10px;right:10px}.save-reminder-dialog .dialog-actions{display:grid}}
+.node-add-button{right:-48px}
+.node-choice-list .picker-item:first-child strong{font-size:0}
+.node-choice-list .picker-item:first-child strong::after{content:"Node";font-size:12px}
