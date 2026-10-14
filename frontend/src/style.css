@@ -109,3 +109,4 @@ body.canvas-fullscreen .app-sidebar,body.canvas-fullscreen .workflow-test-chat{v
 .card > .react-flow__handle-right{right:-34px}
 .node-choice-list .picker-item:first-child strong{font-size:0}
 .node-choice-list .picker-item:first-child strong::after{content:"Node";font-size:12px}
+.dialog-actions .delete-node-dialog-button{margin-right:auto}
