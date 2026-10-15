@@ -7,6 +7,8 @@ secrets. Execution is dry-run by default; live HTTP execution is opt-in.
 from __future__ import annotations
 
 import os
+import ipaddress
+import socket
 from typing import Any
 from urllib.parse import urlparse
 
@@ -80,6 +82,32 @@ TOOL_ID_BY_LABEL = {tool["label"].lower(): tool["id"] for tool in TOOL_DEFINITIO
 
 class ToolConfigurationError(ValueError):
     """Raised when a tool node cannot be safely configured."""
+
+
+def _blocked_http_target(url: str) -> str | None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return "HTTP URL must use http or https and include a hostname."
+    hostname = parsed.hostname.rstrip(".").lower()
+    blocked_names = {"localhost", "metadata.google.internal", "instance-data.ec2.internal"}
+    if hostname in blocked_names or hostname.endswith(".localhost"):
+        return "Local and cloud metadata hosts are blocked."
+    try:
+        addresses = {parsed.hostname}
+        if not ipaddress.ip_address(parsed.hostname).is_global:
+            return "Private, local, reserved, and metadata IP addresses are blocked."
+    except ValueError:
+        try:
+            addresses = {result[4][0] for result in socket.getaddrinfo(hostname, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)}
+        except socket.gaierror:
+            return "The HTTP hostname could not be resolved."
+    for address in addresses:
+        try:
+            if not ipaddress.ip_address(address).is_global:
+                return "The HTTP hostname resolves to a private, local, reserved, or metadata IP address."
+        except ValueError:
+            return "The HTTP hostname resolved to an invalid address."
+    return None
 
 
 def list_tools() -> list[dict[str, Any]]:
@@ -164,10 +192,9 @@ async def execute_tool(node: dict[str, Any], messages: list[dict[str, str]]) -> 
 
     parameters = config.get("parameters", {})
     url = str(parameters.get("url", ""))
-    parsed = urlparse(url)
-    allowed_hosts = {host.strip().lower() for host in os.getenv("ORCHESTRATION_HTTP_ALLOWED_HOSTS", "").split(",") if host.strip()}
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.hostname.lower() not in allowed_hosts:
-        return {"status": "blocked", "tool_id": tool_id, "reason": "HTTP URL is not on the configured allowlist."}
+    blocked_reason = _blocked_http_target(url)
+    if blocked_reason:
+        return {"status": "blocked", "tool_id": tool_id, "reason": blocked_reason}
     method = str(parameters.get("method", "GET")).upper()
     headers = {"User-Agent": "Agent-Orchestration/0.1", "Accept": "application/json"}
     headers.update(parameters.get("headers") or {})
@@ -176,4 +203,6 @@ async def execute_tool(node: dict[str, Any], messages: list[dict[str, str]]) -> 
             response = await client.request(method, url, headers=headers, json=parameters.get("body"))
     except httpx.HTTPError as exc:
         return {"status": "failed", "tool_id": tool_id, "reason": f"HTTP request failed: {type(exc).__name__}"}
+    if 300 <= response.status_code < 400:
+        return {"status": "blocked", "tool_id": tool_id, "http_status": response.status_code, "reason": "HTTP redirects are blocked for safety."}
     return {"status": "completed", "tool_id": tool_id, "http_status": response.status_code, "output": response.text[:4000]}
