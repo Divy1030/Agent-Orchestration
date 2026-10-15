@@ -169,6 +169,11 @@ async def execute_tool(node: dict[str, Any], messages: list[dict[str, str]]) -> 
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.hostname.lower() not in allowed_hosts:
         return {"status": "blocked", "tool_id": tool_id, "reason": "HTTP URL is not on the configured allowlist."}
     method = str(parameters.get("method", "GET")).upper()
-    async with httpx.AsyncClient(timeout=httpx.Timeout(10, connect=3), follow_redirects=False) as client:
-        response = await client.request(method, url, headers=parameters.get("headers") or {}, json=parameters.get("body"))
+    headers = {"User-Agent": "Agent-Orchestration/0.1", "Accept": "application/json"}
+    headers.update(parameters.get("headers") or {})
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10, connect=3), follow_redirects=False) as client:
+            response = await client.request(method, url, headers=headers, json=parameters.get("body"))
+    except httpx.HTTPError as exc:
+        return {"status": "failed", "tool_id": tool_id, "reason": f"HTTP request failed: {type(exc).__name__}"}
     return {"status": "completed", "tool_id": tool_id, "http_status": response.status_code, "output": response.text[:4000]}
