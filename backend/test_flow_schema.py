@@ -22,6 +22,19 @@ class FlowSchemaTests(unittest.TestCase):
         with self.assertRaises(FlowValidationError):
             validate_flow(flow)
 
+    def test_tool_node_requires_supported_tool_configuration(self):
+        flow = {**DEMO_FLOW,
+                "nodes": [*DEMO_FLOW["nodes"], {"id": "mail", "type": "tool", "label": "Unknown Tool", "config": {}}],
+                "edges": [*DEMO_FLOW["edges"], {"from": "answer", "to": "mail", "key": "mail"}, {"from": "mail", "to": "finish", "key": "finish"}]}
+        with self.assertRaises(FlowValidationError):
+            validate_flow(flow)
+
+    def test_tool_node_accepts_catalog_id_and_parameters(self):
+        flow = {**DEMO_FLOW,
+                "nodes": [*DEMO_FLOW["nodes"], {"id": "http", "type": "tool", "label": "HTTP Request", "config": {"tool_id": "http_request", "parameters": {"method": "GET", "url": "https://example.com"}}}],
+                "edges": [*DEMO_FLOW["edges"], {"from": "answer", "to": "http", "key": "http"}, {"from": "http", "to": "finish", "key": "finish"}]}
+        self.assertEqual(validate_flow(flow)["id"], "demo-flow")
+
 
 if __name__ == "__main__":
     unittest.main()

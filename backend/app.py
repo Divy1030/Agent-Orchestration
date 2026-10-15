@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from backend.flow_schema import DEMO_FLOW, FlowValidationError, canvas_graph, validate_flow
 from backend.runtime import FlowRuntime, SessionStore
 from backend.agent_executor import OpenRouterExecutor
+from backend.tool_registry import execute_tool, list_tools
 from backend.auth_models import FlowSaveRequest, LoginRequest, RegisterRequest, ResourceRequest, SessionCreateRequest, WorkspaceRequest
 from backend.mongo_store import MongoRuntimeStore, MongoStore, verify_password
 
@@ -42,7 +43,7 @@ async def execute_agent(node: dict[str, Any], messages: list[dict[str, str]]) ->
     return await openrouter_executor.execute({**node, "config": config}, messages)
 
 
-runtime = FlowRuntime(MongoRuntimeStore(mongo) if mongo.configured else SessionStore(os.getenv("ORCHESTRATION_DB_PATH", "data/orchestration.db")), agent_executor=execute_agent)
+runtime = FlowRuntime(MongoRuntimeStore(mongo) if mongo.configured else SessionStore(os.getenv("ORCHESTRATION_DB_PATH", "data/orchestration.db")), agent_executor=execute_agent, tool_executor=execute_tool)
 
 
 class RunRequest(BaseModel):
@@ -150,6 +151,12 @@ async def choose_edge(graph: dict[str, Any], node_id: str, message: str, history
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/tools")
+def tools_catalog() -> dict[str, Any]:
+    """Return the built-in tool catalog; secrets are never included."""
+    return {"tools": list_tools()}
 
 
 @app.post("/api/auth/register")

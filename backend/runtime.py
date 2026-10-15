@@ -14,6 +14,7 @@ from backend.flow_schema import validate_flow
 
 RouteSelector = Callable[[dict[str, Any], str, str, list[dict[str, str]]], Awaitable[dict[str, Any]]]
 AgentExecutor = Callable[[dict[str, Any], list[dict[str, str]]], Awaitable[dict[str, Any]]]
+ToolExecutor = Callable[[dict[str, Any], list[dict[str, str]]], Awaitable[dict[str, Any]]]
 
 
 def utc_now() -> str:
@@ -75,9 +76,10 @@ class SessionStore:
 
 
 class FlowRuntime:
-    def __init__(self, store: SessionStore, agent_executor: AgentExecutor | None = None):
+    def __init__(self, store: SessionStore, agent_executor: AgentExecutor | None = None, tool_executor: ToolExecutor | None = None):
         self.store = store
         self.agent_executor = agent_executor
+        self.tool_executor = tool_executor
 
     async def start(self, flow: dict[str, Any]) -> dict[str, Any]:
         validate_flow(flow)
@@ -120,6 +122,13 @@ class FlowRuntime:
         if target_node["type"] == "agent" and self.agent_executor:
             agent_result = await self.agent_executor(target_node, session["messages"])
             reply = agent_result.get("reply", reply)
+        if target_node["type"] == "tool" and self.tool_executor:
+            agent_result = await self.tool_executor(target_node, session["messages"])
+            reply = agent_result.get("reply", reply)
+            tool_event = {"type": "tool_completed", "node": target, "tool_id": agent_result.get("tool_id"),
+                          "status": agent_result.get("status"), "reason": agent_result.get("reason")}
+            session["trace"].append(tool_event)
+            self.store.trace(session_id, tool_event)
         if reply:
             session["messages"].append({"role": "assistant", "content": reply})
         if target_node["type"] == "end":

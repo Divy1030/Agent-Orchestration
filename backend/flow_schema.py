@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from typing import Any
 
+from backend.tool_registry import ToolConfigurationError, validate_tool_config
+
 NODE_TYPES = {"start", "message", "agent", "collect", "condition", "jev_router", "tool", "end"}
 VARIABLE_TYPES = {"string", "number", "boolean", "email", "date", "object"}
 
@@ -68,6 +70,11 @@ def validate_flow(flow: Any) -> dict[str, Any]:
             for field in ("routing_instructions", "system_prompt"):
                 if field in config and not isinstance(config[field], str):
                     errors.append(f"node {node_id}: config.{field} must be a string")
+            if node_type == "tool":
+                try:
+                    validate_tool_config(node)
+                except ToolConfigurationError as exc:
+                    errors.append(str(exc))
         node_map[node_id] = node
     starts = [node_id for node_id, node in node_map.items() if node.get("type") == "start"]
     ends = [node_id for node_id, node in node_map.items() if node.get("type") == "end"]

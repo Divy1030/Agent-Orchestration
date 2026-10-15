@@ -38,6 +38,24 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(result["reply"], "workflow agent reply")
             self.assertEqual(seen, ["agent-123"])
 
+    def test_tool_node_is_executed_and_traced(self):
+        seen: list[str] = []
+
+        async def execute_tool(node, messages):
+            seen.append(node["config"]["tool_id"])
+            return {"tool_id": "http_request", "status": "dry_run", "reason": "test"}
+
+        flow = {**DEMO_FLOW,
+                "nodes": [*DEMO_FLOW["nodes"], {"id": "http", "type": "tool", "label": "HTTP Request", "config": {"tool_id": "http_request", "parameters": {}}}],
+                "edges": [*DEMO_FLOW["edges"], {"from": "answer", "to": "http", "key": "http"}, {"from": "http", "to": "finish", "key": "finish"}]}
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = FlowRuntime(SessionStore(str(Path(directory) / "runtime.db")), tool_executor=execute_tool)
+            session = asyncio.run(runtime.start(flow))
+            result = asyncio.run(runtime.turn(flow, session["id"], "hello", lambda *args: asyncio.sleep(0, result={"target": "http", "choice": "http", "provider": "test"})))
+            self.assertEqual(result["current_node"], "http")
+            self.assertEqual(seen, ["http_request"])
+            self.assertTrue(any(event["type"] == "tool_completed" for event in runtime.store.get(session["id"])["trace"]))
+
 
 if __name__ == "__main__":
     unittest.main()
