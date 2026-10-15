@@ -26,6 +26,11 @@ class SessionCreateRequest(BaseModel):
     flow_id: str | None = None
 
 
+class PublicChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+    session_id: str | None = None
+
+
 class ResourceRequest(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     description: str = Field(default="", max_length=500)

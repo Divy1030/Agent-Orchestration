@@ -62,6 +62,7 @@ class MongoStore:
         self._db.flow_versions.create_index([("flow_id", 1), ("version", 1)], unique=True)
         self._db.auth_sessions.create_index("token_hash", unique=True)
         self._db.auth_sessions.create_index("expires_at", expireAfterSeconds=0)
+        self._db.flows.create_index("public_token_hash", sparse=True, unique=True)
         self._db.tools.create_index([("workspace_id", 1), ("name", 1)], unique=True)
         self._db.agents.create_index([("workspace_id", 1), ("name", 1)], unique=True)
         self._db.connectors.create_index([("workspace_id", 1), ("name", 1)], unique=True)
@@ -131,7 +132,7 @@ class MongoStore:
         next_version = int(flow_doc.get("current_version", 0)) + 1
         flow["version"] = next_version
         self.db.flow_versions.insert_one({"flow_id": ObjectId(flow_id), "version": next_version, "flow": flow, "created_by": ObjectId(user_id), "created_at": now()})
-        self.db.flows.update_one({"_id": ObjectId(flow_id)}, {"$set": {"name": flow["name"], "current_version": next_version, "status": "draft", "updated_at": now()}})
+        self.db.flows.update_one({"_id": ObjectId(flow_id)}, {"$set": {"name": flow["name"], "current_version": next_version, "status": "draft", "updated_at": now()}, "$unset": {"public_token_hash": "", "public_token_issued_at": ""}})
         return {"flow_id": flow_id, "version": next_version}
 
     def list_flows(self, user_id: str, workspace_id: str) -> list[dict[str, Any]]:
@@ -168,15 +169,16 @@ class MongoStore:
         version = version or flow.get("current_version", 1)
         if not self.db.flow_versions.find_one({"flow_id": ObjectId(flow_id), "version": version}):
             raise ValueError("Flow version does not exist")
-        self.db.flows.update_one({"_id": ObjectId(flow_id)}, {"$set": {"status": "published", "published_version": version, "updated_at": now()}})
-        return {"flow_id": flow_id, "version": version, "status": "published"}
+        public_token = secrets.token_urlsafe(48)
+        self.db.flows.update_one({"_id": ObjectId(flow_id)}, {"$set": {"status": "published", "published_version": version, "public_token_hash": hashlib.sha256(public_token.encode()).hexdigest(), "public_token_issued_at": now(), "updated_at": now()}})
+        return {"flow_id": flow_id, "slug": flow["slug"], "version": version, "status": "published", "public_token": public_token}
 
     def unpublish_flow(self, user_id: str, flow_id: str) -> dict[str, Any]:
         from bson import ObjectId
         flow = self.db.flows.find_one({"_id": ObjectId(flow_id)})
         if not flow or not self.is_member(user_id, str(flow["workspace_id"])):
             raise PermissionError("Flow access denied")
-        self.db.flows.update_one({"_id": ObjectId(flow_id)}, {"$set": {"status": "draft", "updated_at": now()}})
+        self.db.flows.update_one({"_id": ObjectId(flow_id)}, {"$set": {"status": "draft", "updated_at": now()}, "$unset": {"public_token_hash": "", "public_token_issued_at": ""}})
         return {"flow_id": flow_id, "status": "draft"}
 
     def pause_flow(self, user_id: str, flow_id: str) -> dict[str, Any]:
@@ -205,6 +207,16 @@ class MongoStore:
         if not version:
             raise ValueError("Published flow version is missing")
         return version["flow"]
+
+    def public_flow_by_token(self, slug: str, token: str) -> dict[str, Any] | None:
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        row = self.db.flows.find_one({"slug": slug, "status": "published", "public_token_hash": token_hash})
+        if not row:
+            return None
+        version = self.db.flow_versions.find_one({"flow_id": row["_id"], "version": row.get("published_version")})
+        if not version:
+            return None
+        return {"flow_id": str(row["_id"]), "slug": row["slug"], "version": version["version"], "flow": version["flow"]}
 
     def issue_session(self, user_id: str) -> str:
         token = secrets.token_urlsafe(32)

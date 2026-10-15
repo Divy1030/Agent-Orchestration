@@ -13,7 +13,7 @@ from backend.flow_schema import DEMO_FLOW, FlowValidationError, canvas_graph, va
 from backend.runtime import FlowRuntime, SessionStore
 from backend.agent_executor import OpenRouterExecutor
 from backend.tool_registry import execute_tool, list_tools
-from backend.auth_models import FlowSaveRequest, LoginRequest, RegisterRequest, ResourceRequest, SessionCreateRequest, WorkspaceRequest
+from backend.auth_models import FlowSaveRequest, LoginRequest, PublicChatRequest, RegisterRequest, ResourceRequest, SessionCreateRequest, WorkspaceRequest
 from backend.mongo_store import MongoRuntimeStore, MongoStore, verify_password
 
 load_dotenv()
@@ -324,7 +324,10 @@ def list_flow_versions(flow_id: str, request: Request) -> dict[str, Any]:
 def publish_flow(flow_id: str, request: Request) -> dict[str, Any]:
     user = current_user(request)
     try:
-        return {"flow": mongo.publish_flow(user["id"], flow_id)}
+        result = mongo.publish_flow(user["id"], flow_id)
+        base_url = os.getenv("PUBLIC_API_BASE_URL", str(request.base_url).rstrip("/"))
+        result["public_endpoint"] = f"{base_url}/api/public/workflows/{result['slug']}/chat"
+        return {"flow": result}
     except (PermissionError, ValueError) as exc:
         raise HTTPException(422, str(exc))
 
@@ -482,6 +485,38 @@ async def create_session(request: SessionCreateRequest, http_request: Request) -
     session = await runtime.start(flow)
     return {"session_id": session["id"], "flow_id": session["flow_id"], "flow_version": session["flow_version"],
             "status": session["status"], "current_node": session["current_node"]}
+
+
+def public_token_from_request(request: Request) -> str | None:
+    authorization = request.headers.get("authorization", "")
+    if authorization.lower().startswith("bearer "):
+        return authorization[7:].strip()
+    return request.headers.get("x-workflow-token")
+
+
+@app.post("/api/public/workflows/{slug}/chat")
+async def public_workflow_chat(slug: str, request: PublicChatRequest, http_request: Request) -> dict[str, Any]:
+    store = require_mongo()
+    token = public_token_from_request(http_request)
+    published = store.public_flow_by_token(slug, token or "")
+    if not published:
+        raise HTTPException(401, "Invalid, expired, or unpublished workflow token")
+    flow = deepcopy(published["flow"])
+    flow["id"] = published["flow_id"]
+    flow = validate_flow(flow)
+    session_id = request.session_id
+    if not session_id:
+        session = await runtime.start(flow)
+        session_id = session["id"]
+    else:
+        session = runtime.store.get(session_id)
+        if not session or session.get("flow_id") != published["flow_id"]:
+            raise HTTPException(404, "Chat session not found")
+    try:
+        result = await runtime.turn(flow, session_id, request.message, runtime_route)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"workflow": published["slug"], "version": published["version"], **result}
 
 
 @app.get("/api/sessions/{session_id}")
