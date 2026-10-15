@@ -114,6 +114,21 @@ def validate_tool_config(node: dict[str, Any]) -> None:
         raise ToolConfigurationError(f"node {node.get('id')}: unsupported {tool_id} operation {operation!r}")
 
 
+def validate_attached_tool(tool: dict[str, Any], node_id: str) -> None:
+    if not isinstance(tool, dict) or tool.get("tool_id") not in TOOL_BY_ID:
+        raise ToolConfigurationError(f"node {node_id}: attached tool must use a supported tool_id")
+    if "credential_id" in tool and not isinstance(tool["credential_id"], str):
+        raise ToolConfigurationError(f"node {node_id}: attached tool credential_id must be a string")
+    if "approval_required" in tool and not isinstance(tool["approval_required"], bool):
+        raise ToolConfigurationError(f"node {node_id}: attached tool approval_required must be boolean")
+    parameters = tool.get("parameters", {})
+    if not isinstance(parameters, dict):
+        raise ToolConfigurationError(f"node {node_id}: attached tool parameters must be an object")
+    operation = parameters.get("operation")
+    if operation is not None and operation not in TOOL_BY_ID[tool["tool_id"]]["operations"]:
+        raise ToolConfigurationError(f"node {node_id}: unsupported attached tool operation {operation!r}")
+
+
 def tool_public_config(node: dict[str, Any]) -> dict[str, Any]:
     """Return non-secret tool metadata suitable for trace/UI responses."""
     tool_id = tool_id_for_node(node)

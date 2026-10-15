@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from typing import Any
 
-from backend.tool_registry import ToolConfigurationError, validate_tool_config
+from backend.tool_registry import ToolConfigurationError, validate_attached_tool, validate_tool_config
 
 NODE_TYPES = {"start", "message", "agent", "collect", "condition", "jev_router", "tool", "end"}
 VARIABLE_TYPES = {"string", "number", "boolean", "email", "date", "object"}
@@ -75,6 +75,15 @@ def validate_flow(flow: Any) -> dict[str, Any]:
                     validate_tool_config(node)
                 except ToolConfigurationError as exc:
                     errors.append(str(exc))
+            attached_tools = config.get("tools", [])
+            if not isinstance(attached_tools, list):
+                errors.append(f"node {node_id}: config.tools must be a list")
+            else:
+                for attached_tool in attached_tools:
+                    try:
+                        validate_attached_tool(attached_tool, node_id)
+                    except ToolConfigurationError as exc:
+                        errors.append(str(exc))
         node_map[node_id] = node
     starts = [node_id for node_id, node in node_map.items() if node.get("type") == "start"]
     ends = [node_id for node_id, node in node_map.items() if node.get("type") == "end"]
@@ -158,6 +167,7 @@ def canvas_graph(flow: dict[str, Any]) -> dict[str, Any]:
             "reply": node.get("config", {}).get("reply", ""),
             "instructions": node.get("config", {}).get("instructions", []),
             "routing_instructions": node.get("config", {}).get("routing_instructions", ""),
+            "tools": node.get("config", {}).get("tools", []),
             "routes": routes[node_id],
             "terminal": node["type"] == "end",
         }

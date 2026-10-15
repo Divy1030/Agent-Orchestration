@@ -37,7 +37,7 @@ async def execute_agent(node: dict[str, Any], messages: list[dict[str, str]]) ->
             raise ValueError("Connected agent was not found")
         # Agent documents are the source of truth. Keep only the node fallback
         # reply locally so a disconnected/renamed agent cannot silently drift.
-        node_guidance = {key: config[key] for key in ("workflow_instructions", "routing_instructions", "instructions") if key in config}
+        node_guidance = {key: config[key] for key in ("workflow_instructions", "routing_instructions", "instructions", "tools") if key in config}
         config = {**agent.get("config", {}), **node_guidance,
                   "reply": config.get("reply", agent.get("config", {}).get("reply", ""))}
     return await openrouter_executor.execute({**node, "config": config}, messages)
