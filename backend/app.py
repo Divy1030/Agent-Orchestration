@@ -326,10 +326,21 @@ def publish_flow(flow_id: str, request: Request) -> dict[str, Any]:
     try:
         result = mongo.publish_flow(user["id"], flow_id)
         base_url = os.getenv("PUBLIC_API_BASE_URL", str(request.base_url).rstrip("/"))
-        result["public_endpoint"] = f"{base_url}/api/public/workflows/{result['slug']}/chat"
+        result["public_endpoint"] = f"{base_url}/api/workflows/{result['slug']}/chat"
         return {"flow": result}
     except (PermissionError, ValueError) as exc:
         raise HTTPException(422, str(exc))
+
+
+@app.post("/api/flows/{flow_id}/public-token/rotate")
+def rotate_public_token(flow_id: str, request: Request) -> dict[str, Any]:
+    user = current_user(request)
+    try:
+        result = mongo.rotate_public_token(user["id"], flow_id)
+        base_url = os.getenv("PUBLIC_API_BASE_URL", str(request.base_url).rstrip("/"))
+        return {**result, "public_endpoint": f"{base_url}/api/workflows/{result['slug']}/chat"}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
 
 
 @app.post("/api/flows/{flow_id}/unpublish")
@@ -494,7 +505,8 @@ def public_token_from_request(request: Request) -> str | None:
     return request.headers.get("x-workflow-token")
 
 
-@app.post("/api/public/workflows/{slug}/chat")
+@app.post("/api/workflows/{slug}/chat")
+@app.post("/api/public/workflows/{slug}/chat", include_in_schema=False)
 async def public_workflow_chat(slug: str, request: PublicChatRequest, http_request: Request) -> dict[str, Any]:
     store = require_mongo()
     token = public_token_from_request(http_request)

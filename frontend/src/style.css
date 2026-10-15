@@ -123,5 +123,6 @@ body.canvas-fullscreen .app-sidebar,body.canvas-fullscreen .workflow-test-chat{v
 .tool-config-dialog textarea{min-height:92px}
 .tool-config-dialog .dialog-actions{position:sticky;bottom:-20px;margin:18px -20px -20px;padding:14px 20px 20px;background:var(--surface);border-top:1px solid var(--line);z-index:3}
 .public-publish-dialog{width:min(640px,calc(100% - 30px))}.public-publish-dialog textarea{min-height:90px}
+.public-token-field{display:flex;gap:8px;margin-top:7px}.public-token-field input{flex:1;min-width:0;margin:0!important}.copy-public-token{flex:0 0 auto;min-width:92px;border:1px solid var(--line);border-radius:0;background:var(--surface-muted);color:var(--ink);font:inherit;font-size:12px;font-weight:650;padding:0 12px;cursor:pointer}.copy-public-token:hover:not(:disabled){border-color:#8575dc;color:#a899ff}.copy-public-token:disabled{opacity:.5;cursor:not-allowed}
 .tool-approval-toggle{display:flex!important;align-items:center;gap:8px;margin-top:15px!important}
 .tool-approval-toggle input{width:16px!important;height:16px!important;margin:0!important;padding:0!important}
