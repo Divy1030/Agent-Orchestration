@@ -19,12 +19,22 @@ from backend.mongo_store import MongoRuntimeStore, MongoStore, verify_password
 load_dotenv()
 
 app = FastAPI(title="Agent Orchestration Base", version="0.1.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+cors_origins = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",") if origin.strip()]
+app.add_middleware(CORSMiddleware, allow_origins=cors_origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 FLOW = validate_flow(DEMO_FLOW)
 GRAPH = canvas_graph(FLOW)
 mongo = MongoStore()
 openrouter_executor = OpenRouterExecutor()
+
+
+def auth_cookie_options() -> dict[str, Any]:
+    return {
+        "httponly": True,
+        "secure": os.getenv("AUTH_COOKIE_SECURE", "false").lower() == "true",
+        "samesite": os.getenv("AUTH_COOKIE_SAMESITE", "lax").lower(),
+        "max_age": 7 * 86400,
+    }
 
 
 async def execute_agent(node: dict[str, Any], messages: list[dict[str, str]]) -> dict[str, Any]:
@@ -226,7 +236,7 @@ def register(request: RegisterRequest, response: Response) -> dict[str, Any]:
         token = store.issue_session(user["id"])
     except ValueError as exc:
         raise HTTPException(409, str(exc))
-    response.set_cookie(os.getenv("AUTH_COOKIE_NAME", "ao_session"), token, httponly=True, secure=os.getenv("AUTH_COOKIE_SECURE", "false").lower() == "true", samesite="lax", max_age=7 * 86400)
+    response.set_cookie(os.getenv("AUTH_COOKIE_NAME", "ao_session"), token, **auth_cookie_options())
     return {"user": user}
 
 
@@ -237,7 +247,7 @@ def login(request: LoginRequest, response: Response) -> dict[str, Any]:
     if not user or not verify_password(request.password, user["password_hash"]):
         raise HTTPException(401, "Invalid email or password")
     token = store.issue_session(user["id"])
-    response.set_cookie(os.getenv("AUTH_COOKIE_NAME", "ao_session"), token, httponly=True, secure=os.getenv("AUTH_COOKIE_SECURE", "false").lower() == "true", samesite="lax", max_age=7 * 86400)
+    response.set_cookie(os.getenv("AUTH_COOKIE_NAME", "ao_session"), token, **auth_cookie_options())
     return {"user": store.public_user(user)}
 
 
@@ -248,7 +258,7 @@ def logout(request: Request, response: Response) -> dict[str, bool]:
     token = request.cookies.get(name)
     if token:
         store.revoke_session(token)
-    response.delete_cookie(name)
+    response.delete_cookie(name, secure=os.getenv("AUTH_COOKIE_SECURE", "false").lower() == "true", samesite=os.getenv("AUTH_COOKIE_SAMESITE", "lax").lower())
     return {"ok": True}
 
 

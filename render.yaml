@@ -15,3 +15,9 @@ services:
         sync: false
       - key: JEV_MOCK
         value: "false"
+      - key: CORS_ORIGINS
+        sync: false
+      - key: AUTH_COOKIE_SECURE
+        value: "true"
+      - key: AUTH_COOKIE_SAMESITE
+        value: none
