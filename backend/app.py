@@ -55,7 +55,7 @@ async def execute_agent(node: dict[str, Any], messages: list[dict[str, str]]) ->
 
 def _tool_matches_message(tool: dict[str, Any], message: str) -> bool:
     text = message.lower()
-    identity = f"{tool.get('tool_id', '')} {tool.get('label', '')} {tool.get('name', '')} {tool.get('description', '')} {tool.get('input_mapping', '')}".lower()
+    identity = f"{tool.get('tool_id', '')} {tool.get('label', '')} {tool.get('name', '')} {tool.get('description', '')}".lower()
     aliases = {
         "weather": ("weather", "forecast", "temperature", "rain", "wind", "climate"),
         "stock": ("stock", "share price", "market", "ticker", "equity"),
@@ -84,7 +84,7 @@ async def select_attached_tools(tools: list[dict[str, Any]], messages: list[dict
     payload = {
         "model": os.getenv("JEV_MODEL", "jev-latest"),
         "state": {"latest_message": latest, "available_tools": [
-            {"id": key, "name": tool.get("name", tool.get("label", tool.get("tool_id"))), "description": tool.get("description", ""), "input_mapping": tool.get("input_mapping", "")}
+            {"id": key, "name": tool.get("name", tool.get("label", tool.get("tool_id"))), "description": tool.get("description", "")}
             for key, tool in choices.items() if tool
         ]},
         "questions": {"tool": {"type": "choice", "instructions": "Choose the single attached tool that best answers the latest user request, or none if no tool is relevant.", "criteria": {
