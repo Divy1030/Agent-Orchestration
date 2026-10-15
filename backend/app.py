@@ -40,8 +40,10 @@ async def execute_agent(node: dict[str, Any], messages: list[dict[str, str]]) ->
         node_guidance = {key: config[key] for key in ("workflow_instructions", "routing_instructions", "instructions", "tools") if key in config}
         config = {**agent.get("config", {}), **node_guidance,
                   "reply": config.get("reply", agent.get("config", {}).get("reply", ""))}
+    attached_tools = [tool for tool in config.get("tools", []) if isinstance(tool, dict)]
+    selected_tools = await select_attached_tools(attached_tools, messages)
     tool_results = []
-    for attached_tool in config.get("tools", []):
+    for attached_tool in selected_tools:
         tool_node = {"id": f"{node.get('id', 'agent')}-{attached_tool.get('tool_id', 'tool')}",
                      "type": "tool", "label": attached_tool.get("label", attached_tool.get("tool_id", "Tool")),
                      "config": attached_tool}
@@ -49,6 +51,54 @@ async def execute_agent(node: dict[str, Any], messages: list[dict[str, str]]) ->
     if tool_results:
         config["tool_results"] = tool_results
     return await openrouter_executor.execute({**node, "config": config}, messages)
+
+
+def _tool_matches_message(tool: dict[str, Any], message: str) -> bool:
+    text = message.lower()
+    identity = f"{tool.get('tool_id', '')} {tool.get('label', '')}".lower()
+    aliases = {
+        "weather": ("weather", "forecast", "temperature", "rain", "wind", "climate"),
+        "stock": ("stock", "share price", "market", "ticker", "equity"),
+        "calendar": ("calendar", "meeting", "appointment", "availability", "event"),
+        "email": ("email", "mail", "inbox", "gmail", "send a message"),
+        "sheet": ("spreadsheet", "sheet", "row", "column", "cell"),
+    }
+    for key, words in aliases.items():
+        if key in identity and any(word in text for word in words):
+            return True
+    return any(token in text for token in identity.split() if len(token) > 3)
+
+
+async def select_attached_tools(tools: list[dict[str, Any]], messages: list[dict[str, str]]) -> list[dict[str, Any]]:
+    """Use Jev to select one relevant attached tool when a node has several."""
+    if len(tools) <= 1:
+        return tools
+    latest = next((item.get("content", "") for item in reversed(messages) if item.get("role") == "user"), "")
+    if os.getenv("JEV_MOCK", "true").lower() == "true":
+        return [tool for tool in tools if _tool_matches_message(tool, latest)]
+    api_key = os.getenv("JEV_API_KEY") or os.getenv("TYPESAFE_API_KEY") or os.getenv("SYSTEM_ONE_API_KEY")
+    if not api_key:
+        return [tool for tool in tools if _tool_matches_message(tool, latest)]
+    choices = {f"tool_{index}": tool for index, tool in enumerate(tools)}
+    choices["none"] = None
+    payload = {
+        "model": os.getenv("JEV_MODEL", "jev-latest"),
+        "state": {"latest_message": latest, "available_tools": [
+            {"id": key, "name": tool.get("label", tool.get("tool_id")), "description": tool.get("description", "")}
+            for key, tool in choices.items() if tool
+        ]},
+        "questions": {"tool": {"type": "choice", "instructions": "Choose the single attached tool that best answers the latest user request, or none if no tool is relevant.", "criteria": {
+            key: (tool.get("description") or tool.get("label") or tool.get("tool_id", "")) for key, tool in choices.items()
+        }}},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(8, connect=3)) as client:
+            response = await client.post(jev_url(), headers={"Authorization": f"Bearer {api_key}"}, json=payload)
+        response.raise_for_status()
+        choice = response.json().get("answers", {}).get("tool", {}).get("choice")
+        return [choices[choice]] if choice in choices and choices[choice] else []
+    except Exception:
+        return [tool for tool in tools if _tool_matches_message(tool, latest)]
 
 
 runtime = FlowRuntime(MongoRuntimeStore(mongo) if mongo.configured else SessionStore(os.getenv("ORCHESTRATION_DB_PATH", "data/orchestration.db")), agent_executor=execute_agent, tool_executor=execute_tool)
