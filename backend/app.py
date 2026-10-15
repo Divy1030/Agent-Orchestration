@@ -40,6 +40,14 @@ async def execute_agent(node: dict[str, Any], messages: list[dict[str, str]]) ->
         node_guidance = {key: config[key] for key in ("workflow_instructions", "routing_instructions", "instructions", "tools") if key in config}
         config = {**agent.get("config", {}), **node_guidance,
                   "reply": config.get("reply", agent.get("config", {}).get("reply", ""))}
+    tool_results = []
+    for attached_tool in config.get("tools", []):
+        tool_node = {"id": f"{node.get('id', 'agent')}-{attached_tool.get('tool_id', 'tool')}",
+                     "type": "tool", "label": attached_tool.get("label", attached_tool.get("tool_id", "Tool")),
+                     "config": attached_tool}
+        tool_results.append(await execute_tool(tool_node, messages))
+    if tool_results:
+        config["tool_results"] = tool_results
     return await openrouter_executor.execute({**node, "config": config}, messages)
 
 

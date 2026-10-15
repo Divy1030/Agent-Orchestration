@@ -27,6 +27,7 @@ class OpenRouterExecutor:
         routing_instructions = str(config.get("routing_instructions") or "").strip()
         instructions = [str(item).strip() for item in config.get("instructions", []) if str(item).strip()]
         attached_tools = [tool for tool in config.get("tools", []) if isinstance(tool, dict)]
+        tool_results = [result for result in config.get("tool_results", []) if isinstance(result, dict)]
         guidance_sections = []
         if workflow_instructions:
             guidance_sections.append(f"Workflow instructions:\n{workflow_instructions}")
@@ -39,6 +40,9 @@ class OpenRouterExecutor:
                 f"- {tool.get('tool_id')}: use only when the request matches this node's configured tool behavior"
                 for tool in attached_tools
             ))
+        if tool_results:
+            import json
+            guidance_sections.append("Results from the attached tools for this turn:\n" + json.dumps(tool_results, ensure_ascii=False)[:12000])
         if guidance_sections:
             system_prompt += "\n\n" + "\n\n".join(guidance_sections)
         request_messages = [{"role": "system", "content": system_prompt}] + [
