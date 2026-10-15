@@ -1,6 +1,9 @@
 {
   "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://agent-orchestration-ka29.onrender.com/api/:path*"
+    },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
 }
-

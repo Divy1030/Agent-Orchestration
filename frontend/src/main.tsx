@@ -11,7 +11,9 @@ type D = { message: string; node?: string; history: {role:string;content:string}
 type User = { id: string; email: string; name: string };
 type Workspace = { id: string; name: string; slug: string; role: string };
 type SavedFlow = { id: string; slug: string; name: string; version: number; status: string; agent_id?: string; published_version?: number | null };
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
+// In production, route API calls through the frontend origin. This keeps the
+// auth cookie same-site instead of relying on browser third-party-cookie rules.
+const API_BASE_URL = (import.meta.env.DEV ? (import.meta.env.VITE_API_BASE_URL || '') : '').replace(/\/+$/, '');
 const api = (url: string, init?: RequestInit) => fetch(`${API_BASE_URL}${url}`, { ...init, credentials: 'include' }).then(async r => { const text=await r.text(); let x:any; try{x=text?JSON.parse(text):{}}catch{ x={detail:text||'Request failed'} } if(!r.ok) throw Error(typeof x.detail === 'string' ? x.detail : 'Request failed'); return x; });
 const OPENROUTER_MODELS=[{id:'openai/gpt-4o-mini',label:'GPT-4o Mini',category:'Fast & general'},{id:'anthropic/claude-3.5-sonnet',label:'Claude 3.5 Sonnet',category:'Reasoning & writing'},{id:'google/gemini-2.0-flash-001',label:'Gemini 2.0 Flash',category:'Fast & multimodal'},{id:'meta-llama/llama-3.3-70b-instruct',label:'Llama 3.3 70B Instruct',category:'Open source'},{id:'deepseek/deepseek-chat',label:'DeepSeek Chat',category:'Fast & general'}];
 function normalizeFlowToolIds(value:any) { return {...value,nodes:(value.nodes||[]).map((node:any)=>({...node,config:{...node.config,tools:(node.config?.tools||[]).map((tool:any,index:number)=>({...tool,tool_instance_id:tool.tool_instance_id||`${node.id}-tool-${index}`}))}}))}; }
