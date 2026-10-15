@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: agent-orchestration-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: uvicorn backend.app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: MONGODB_URI
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: JEV_API_KEY
+        sync: false
+      - key: JEV_MOCK
+        value: "false"

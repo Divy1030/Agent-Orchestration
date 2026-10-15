@@ -325,7 +325,7 @@ def publish_flow(flow_id: str, request: Request) -> dict[str, Any]:
     user = current_user(request)
     try:
         result = mongo.publish_flow(user["id"], flow_id)
-        base_url = os.getenv("PUBLIC_API_BASE_URL", str(request.base_url).rstrip("/"))
+        base_url = os.getenv("PUBLIC_API_BASE_URL") or os.getenv("RENDER_EXTERNAL_URL") or str(request.base_url).rstrip("/")
         result["public_endpoint"] = f"{base_url}/api/workflows/{result['slug']}/chat"
         return {"flow": result}
     except (PermissionError, ValueError) as exc:
@@ -337,7 +337,7 @@ def rotate_public_token(flow_id: str, request: Request) -> dict[str, Any]:
     user = current_user(request)
     try:
         result = mongo.rotate_public_token(user["id"], flow_id)
-        base_url = os.getenv("PUBLIC_API_BASE_URL", str(request.base_url).rstrip("/"))
+        base_url = os.getenv("PUBLIC_API_BASE_URL") or os.getenv("RENDER_EXTERNAL_URL") or str(request.base_url).rstrip("/")
         return {**result, "public_endpoint": f"{base_url}/api/workflows/{result['slug']}/chat"}
     except PermissionError as exc:
         raise HTTPException(403, str(exc)) from exc
