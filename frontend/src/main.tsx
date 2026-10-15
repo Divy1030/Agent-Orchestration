@@ -25,10 +25,11 @@ function Card({ data }: any) { const guidance=(data.instructions||[]).join(' •
 function ToolConfigDialog({tool,onClose,onSave,onDelete}: {tool:any;onClose:()=>void;onSave:(tool:any)=>void;onDelete:()=>void}) {
   const operations:Record<string,string[]>={http_request:['request'],gmail:['send','search','read'],google_sheets:['read','append','update'],google_calendar:['create_event','list_events','availability']};
   const current=tool.parameters||{};
+  const defaultStockUrl='https://api.nasdaq.com/api/quote/AAPL/info?assetclass=stocks';
   const [credentialId,setCredentialId]=useState(tool.credential_id||'');
   const [operation,setOperation]=useState(current.operation||operations[tool.tool_id]?.[0]||'request');
   const [method,setMethod]=useState(current.method||'GET');
-  const [url,setUrl]=useState(current.url||'');
+  const [url,setUrl]=useState(current.url||(tool.tool_id==='http_request'?defaultStockUrl:''));
   const [parameters,setParameters]=useState(JSON.stringify(Object.fromEntries(Object.entries(current).filter(([key])=>!['operation','method','url'].includes(key))),null,2));
   const [approval,setApproval]=useState(tool.approval_required!==false);
   const save=()=>{try{const parsed=JSON.parse(parameters||'{}');const requestFields=tool.tool_id==='http_request'?{method,url:url.trim(),...parsed}:{...parsed};onSave({...tool,credential_id:credentialId.trim(),approval_required:approval,parameters:{...requestFields,operation}})}catch{window.alert('Tool parameters must be valid JSON.')}};
