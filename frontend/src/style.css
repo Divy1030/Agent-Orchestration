@@ -117,5 +117,10 @@ body.canvas-fullscreen .app-sidebar,body.canvas-fullscreen .workflow-test-chat{v
 .tool-config-dialog select,.tool-config-dialog input,.tool-config-dialog textarea{display:block;width:100%;margin-top:7px;border:1px solid var(--line);border-radius:0!important;padding:10px;background:var(--surface-muted);color:var(--ink);font:inherit}
 .tool-config-dialog select,.tool-config-dialog input{height:42px}
 .tool-config-dialog textarea{min-height:145px;resize:vertical;font-family:ui-monospace,SFMono-Regular,monospace;font-size:12px}
+.tool-config-dialog{max-height:calc(100vh - 80px);padding:20px;overflow-y:auto}
+.tool-config-dialog .dialog-heading{margin-bottom:14px}
+.tool-config-dialog label{margin-top:11px}
+.tool-config-dialog textarea{min-height:92px}
+.tool-config-dialog .dialog-actions{position:sticky;bottom:-20px;margin:18px -20px -20px;padding:14px 20px 20px;background:var(--surface);border-top:1px solid var(--line);z-index:3}
 .tool-approval-toggle{display:flex!important;align-items:center;gap:8px;margin-top:15px!important}
 .tool-approval-toggle input{width:16px!important;height:16px!important;margin:0!important;padding:0!important}
