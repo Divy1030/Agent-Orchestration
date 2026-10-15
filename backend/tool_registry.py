@@ -165,8 +165,7 @@ async def execute_tool(node: dict[str, Any], messages: list[dict[str, str]]) -> 
     parameters = config.get("parameters", {})
     url = str(parameters.get("url", ""))
     parsed = urlparse(url)
-    configured_hosts = {host.strip().lower() for host in os.getenv("ORCHESTRATION_HTTP_ALLOWED_HOSTS", "").split(",") if host.strip()}
-    allowed_hosts = {"api.nasdaq.com", *configured_hosts}
+    allowed_hosts = {host.strip().lower() for host in os.getenv("ORCHESTRATION_HTTP_ALLOWED_HOSTS", "").split(",") if host.strip()}
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.hostname.lower() not in allowed_hosts:
         return {"status": "blocked", "tool_id": tool_id, "reason": "HTTP URL is not on the configured allowlist."}
     method = str(parameters.get("method", "GET")).upper()
