@@ -19,8 +19,9 @@ from backend.mongo_store import MongoRuntimeStore, MongoStore, verify_password
 load_dotenv()
 
 app = FastAPI(title="Agent Orchestration Base", version="0.1.0")
-cors_origins = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173,https://agent-orchestration-dun.vercel.app").split(",") if origin.strip()]
-app.add_middleware(CORSMiddleware, allow_origins=cors_origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+# Reflect any HTTP(S) origin so credentialed browser requests work. A literal
+# allow_origins=["*"] is incompatible with credentialed CORS in browsers.
+app.add_middleware(CORSMiddleware, allow_origin_regex=r"https?://.*", allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 FLOW = validate_flow(DEMO_FLOW)
 GRAPH = canvas_graph(FLOW)
