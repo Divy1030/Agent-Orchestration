@@ -258,15 +258,7 @@ async def mcp_discover(payload: McpDiscoverRequest, request: Request) -> dict[st
 
 @app.post("/api/auth/register")
 def register(request: RegisterRequest, response: Response) -> dict[str, Any]:
-    store = require_mongo()
-    try:
-        user = store.create_user(request.email, request.password, request.name)
-        store.create_workspace(user["id"], request.workspace_name)
-        token = store.issue_session(user["id"])
-    except ValueError as exc:
-        raise HTTPException(409, str(exc))
-    response.set_cookie(os.getenv("AUTH_COOKIE_NAME", "ao_session"), token, **auth_cookie_options())
-    return {"user": user}
+    raise HTTPException(403, "New registrations are temporarily closed while setup is in progress.")
 
 
 @app.post("/api/auth/login")
