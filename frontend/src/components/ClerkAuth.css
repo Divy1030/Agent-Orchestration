@@ -1,0 +1,186 @@
+.auth-loading {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  color: #718097;
+  font-size: 13px
+}
+
+.clerk-auth-heading {
+  margin: 0 0 18px
+}
+
+.clerk-auth-heading h1 {
+  margin: 0 0 5px;
+  font-size: 25px
+}
+
+.clerk-auth-heading p {
+  margin: 0;
+  color: #718097
+}
+
+.clerk-auth-panel {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden
+}
+
+.clerk-auth-panel * {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%
+}
+
+.clerk-auth-panel .cl-rootBox,
+.clerk-auth-panel .cl-card,
+.clerk-auth-panel .cl-main,
+.clerk-auth-panel .cl-form,
+.clerk-auth-panel .cl-formFieldRow,
+.clerk-auth-panel .cl-socialButtons,
+.clerk-auth-panel .cl-socialButtonsBlock {
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: 100% !important
+}
+
+.clerk-auth-panel .cl-rootBox {
+  display: block
+}
+
+.clerk-auth-panel .cl-card {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  overflow: visible
+}
+
+.clerk-auth-panel .cl-formFieldInput,
+.clerk-auth-panel .cl-otpCodeFieldInput,
+.clerk-auth-panel .cl-formButtonPrimary,
+.clerk-auth-panel .cl-socialButtonsBlockButton,
+.clerk-auth-panel .cl-alternativeMethodsBlockButton {
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: 100% !important
+}
+
+.clerk-auth-panel .cl-formField {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+  margin: 0 0 8px !important;
+  padding: 0 !important
+}
+
+.clerk-auth-panel .cl-formFieldLabelRow {
+  width: 100%;
+  min-height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important
+}
+
+.clerk-auth-panel .cl-formFieldInput {
+  display: block;
+  margin: 0 !important
+}
+
+.clerk-auth-panel .cl-formFieldRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px;
+  margin: 0 0 8px !important;
+  padding: 0 !important
+}
+
+.clerk-auth-panel .cl-socialButtonsBlock {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(130px, 100%), 1fr));
+  gap: 8px
+}
+
+.clerk-auth-panel .cl-formFieldInput,
+.clerk-auth-panel .cl-otpCodeFieldInput,
+.clerk-auth-panel .cl-formButtonPrimary,
+.clerk-auth-panel .cl-socialButtonsBlockButton,
+.auth-mode-button {
+  border-radius: 0 !important
+}
+
+.clerk-auth-panel .cl-formButtonPrimary,
+.clerk-auth-panel .auth-mode-button {
+  display: block !important;
+  width: 100% !important;
+  height: 44px !important;
+  min-height: 44px !important;
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+  padding: 0 14px !important;
+  line-height: 1 !important
+}
+
+.clerk-auth-panel .auth-mode-button {
+  margin-top: 8px !important;
+  background: #f2f4f8;
+  color: #526176;
+  font-weight: 650
+}
+
+.clerk-auth-panel .cl-footer,
+.clerk-auth-panel .cl-footerAction {
+  display: none
+}
+
+.clerk-auth-panel .cl-formFieldInput,
+.clerk-auth-panel .cl-otpCodeFieldInput {
+  border-radius: 0 !important
+}
+
+:root[data-theme="dark"] .clerk-auth-panel .cl-formFieldInput,
+:root[data-theme="dark"] .clerk-auth-panel .cl-otpCodeFieldInput {
+  background: var(--surface-muted);
+  border-color: var(--line);
+  color: var(--ink)
+}
+
+:root[data-theme="dark"] .clerk-auth-panel .cl-formFieldLabel,
+:root[data-theme="dark"] .clerk-auth-panel .cl-headerTitle,
+:root[data-theme="dark"] .clerk-auth-panel .cl-headerSubtitle {
+  color: var(--ink)
+}
+
+.clerk-account-button,
+.clerk-account-trigger {
+  border-radius: 0 !important
+}
+
+.auth-provider-status {
+  padding: 5px 8px;
+  border: 1px solid #dbe2ed;
+  color: #718097;
+  font-size: 10px;
+  font-weight: 650
+}
+
+.auth-provider-status.configured {
+  border-color: #8fdbb8;
+  color: #087f50
+}
+
+.settings-runtime-note {
+  color: #718097;
+  font-size: 11px;
+  line-height: 1.6
+}
+
+:root[data-theme="dark"] .clerk-auth-heading p,
+:root[data-theme="dark"] .settings-runtime-note {
+  color: var(--muted)
+}

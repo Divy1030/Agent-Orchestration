@@ -56,6 +56,10 @@ class MongoStore:
 
     def _ensure_indexes(self) -> None:
         self._db.users.create_index("email", unique=True)
+        # A Clerk identity is linked onto the existing Mongo user document.
+        # The sparse unique index leaves legacy users untouched and prevents
+        # accidentally associating one Clerk account with multiple records.
+        self._db.users.create_index("clerk_user_id", unique=True, sparse=True)
         self._db.workspaces.create_index("slug", unique=True)
         self._db.memberships.create_index([("workspace_id", 1), ("user_id", 1)], unique=True)
         self._db.flows.create_index([("workspace_id", 1), ("slug", 1)], unique=True)
@@ -82,6 +86,56 @@ class MongoStore:
     def user_by_email(self, email: str) -> dict[str, Any] | None:
         doc = self.db.users.find_one({"email": email.lower().strip()})
         return self.public_user(doc) if doc else None
+
+    def user_by_clerk_id(self, clerk_user_id: str) -> dict[str, Any] | None:
+        doc = self.db.users.find_one({"clerk_user_id": clerk_user_id})
+        return self.public_user(doc) if doc else None
+
+    def link_clerk_identity(self, clerk_user_id: str, email: str, name: str = "") -> dict[str, Any] | None:
+        """Link a verified Clerk identity to an existing account, never create one."""
+        from pymongo.errors import DuplicateKeyError
+
+        normalized_email = email.lower().strip()
+        existing = self.db.users.find_one({"clerk_user_id": clerk_user_id})
+        if existing:
+            return self.public_user(existing)
+        legacy = self.db.users.find_one({"email": normalized_email})
+        if not legacy:
+            return None
+        try:
+            result = self.db.users.update_one(
+                {"_id": legacy["_id"], "$or": [
+                    {"clerk_user_id": {"$exists": False}},
+                    {"clerk_user_id": None},
+                    {"clerk_user_id": clerk_user_id},
+                ]},
+                {"$set": {"clerk_user_id": clerk_user_id}},
+            )
+        except DuplicateKeyError:
+            return None
+        if not result.matched_count:
+            return None
+        linked = self.db.users.find_one({"_id": legacy["_id"]})
+        return self.public_user(linked) if linked else None
+
+    def create_clerk_user(self, clerk_user_id: str, email: str, name: str = "") -> dict[str, Any]:
+        """Create a Mongo identity for a verified Clerk user during open signup."""
+        from pymongo.errors import DuplicateKeyError
+
+        normalized_email = email.lower().strip()
+        try:
+            result = self.db.users.insert_one({
+                "email": normalized_email,
+                "name": name.strip() or normalized_email.split("@")[0],
+                "clerk_user_id": clerk_user_id,
+                "created_at": now(),
+            })
+        except DuplicateKeyError:
+            linked = self.link_clerk_identity(clerk_user_id, normalized_email, name)
+            if linked:
+                return linked
+            raise ValueError("An account with this email already exists")
+        return self.public_user(self.db.users.find_one({"_id": result.inserted_id}))
 
     def user_for_login(self, email: str) -> dict[str, Any] | None:
         doc = self.db.users.find_one({"email": email.lower().strip()})
