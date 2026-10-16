@@ -57,7 +57,11 @@ export default function McpConnectionDialog({ onClose, onDiscover, onAdd }: Prop
           <PlugsConnected size={16}/>{added ? 'Server added to node' : `Add server with ${functions.length} functions`}
         </button>
       </>}
-      <p className="mcp-transport-note">This creates one server connection on the node; its functions are grouped under that connection. Remote Streamable HTTP only. Local stdio and authenticated/OAuth servers are not supported yet.</p>
+      <aside className="mcp-support-note" aria-label="Supported MCP server types">
+        <strong>What can connect</strong>
+        <p>Publicly reachable HTTPS MCP servers using Streamable HTTP with no authentication.</p>
+        <p>Local stdio, OAuth, and servers requiring API keys or custom authentication headers aren’t supported yet.</p>
+      </aside>
     </section>
   </div>;
 }
