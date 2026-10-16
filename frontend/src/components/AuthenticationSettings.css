@@ -1,0 +1,3 @@
+.auth-provider-status{white-space:nowrap}
+:root[data-theme="dark"] .auth-provider-status{border-color:var(--line);color:var(--muted)}
+:root[data-theme="dark"] .auth-provider-status.configured{border-color:#286b4d;color:#78d6a7}

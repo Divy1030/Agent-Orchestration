@@ -62,3 +62,9 @@ JEV_MODEL=jev-latest
 The runtime also accepts `TYPESAFE_API_KEY` (the name used by the source Voice-Agent) and `SYSTEM_ONE_API_KEY` (the name used in the current System One documentation).
 
 For the first canvas test, `JEV_MOCK=true` lets the runtime use a deterministic first-route choice without making a paid request.
+
+## Clerk sign-in setup
+
+The React client uses Clerk for sign-in, email verification/recovery, and Google sign-in. Set `VITE_CLERK_PUBLISHABLE_KEY` in `frontend/.env.local` for local development and in the Vercel project environment for deployment. Set `CLERK_SECRET_KEY` only in the backend environment (local root `.env` or Render), and set `CLERK_AUTHORIZED_PARTIES` to the exact browser origins, comma-separated. Copy the variable names from `frontend/.env.example` and `backend/.env.example`; do not replace an existing `.env` file or commit real keys. The publishable key is public; the secret key must never be added to frontend variables.
+
+Enable Google as a social connection in the selected Clerk application's dashboard. The app hides public sign-up and the API still rejects new registrations. A signed-in Clerk user is linked only to an existing Mongo account with the same verified primary email. Mongo user IDs, workspaces, memberships, workflows, and password hashes are not deleted or rewritten. Because the legacy password hash is not imported into Clerk, an existing account must use Google with its matching verified email or be provisioned in Clerk and complete Clerk's password setup/reset before signing in. Unknown Clerk identities are denied access rather than creating a new Mongo account.

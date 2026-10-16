@@ -16,6 +16,7 @@ from backend.tool_registry import execute_tool, list_tools
 from backend.mcp_tools import McpConnectionError, call_mcp_tool, discover_mcp_tools, expand_mcp_servers
 from backend.auth_models import FlowSaveRequest, LoginRequest, PublicChatRequest, RegisterRequest, ResourceRequest, SessionCreateRequest, WorkspaceRequest
 from backend.mongo_store import MongoRuntimeStore, MongoStore, verify_password
+from backend.clerk_auth import ClerkAuthError, clerk_user_from_request
 
 load_dotenv()
 
@@ -164,6 +165,16 @@ def require_mongo() -> MongoStore:
 
 def current_user(request: Request) -> dict[str, Any]:
     store = require_mongo()
+    # Clerk bearer sessions are used by the new React client. Keep Mongo's
+    # existing ao_session cookie available during rollout for existing users.
+    if request.headers.get("authorization", "").lower().startswith("bearer "):
+        try:
+            user = clerk_user_from_request(request, store)
+        except ClerkAuthError as exc:
+            raise HTTPException(exc.status_code, str(exc)) from exc
+        if not user:
+            raise HTTPException(401, "Invalid Clerk session")
+        return user
     token = request.cookies.get(os.getenv("AUTH_COOKIE_NAME", "ao_session"))
     user = store.user_by_session(token) if token else None
     if not user:
@@ -258,7 +269,25 @@ async def mcp_discover(payload: McpDiscoverRequest, request: Request) -> dict[st
 
 @app.post("/api/auth/register")
 def register(request: RegisterRequest, response: Response) -> dict[str, Any]:
-    raise HTTPException(403, "New registrations are temporarily closed while setup is in progress.")
+    if not registrations_enabled():
+        raise HTTPException(403, "New registrations are temporarily closed while setup is in progress.")
+    store = require_mongo()
+    try:
+        user = store.create_user(request.email, request.password, request.name)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    store.create_workspace(user["id"], request.workspace_name)
+    token = store.issue_session(user["id"])
+    response.set_cookie(os.getenv("AUTH_COOKIE_NAME", "ao_session"), token, **auth_cookie_options())
+    return {"user": user}
+
+
+def registrations_enabled() -> bool:
+    configured = os.getenv("ALLOW_NEW_REGISTRATIONS")
+    if configured is not None:
+        return configured.strip().lower() in {"1", "true", "yes", "on"}
+    # Local development is open for testing; Render stays closed unless explicitly enabled.
+    return not bool(os.getenv("RENDER"))
 
 
 @app.post("/api/auth/login")
