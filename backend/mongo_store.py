@@ -132,7 +132,10 @@ class MongoStore:
         next_version = int(flow_doc.get("current_version", 0)) + 1
         flow["version"] = next_version
         self.db.flow_versions.insert_one({"flow_id": ObjectId(flow_id), "version": next_version, "flow": flow, "created_by": ObjectId(user_id), "created_at": now()})
-        self.db.flows.update_one({"_id": ObjectId(flow_id)}, {"$set": {"name": flow["name"], "current_version": next_version, "status": "draft", "updated_at": now()}})
+        # Saving a new draft must not unpublish the currently live version.
+        # Keep published_version/status (and its public token) unchanged until
+        # the user explicitly publishes this new version or unpublishes it.
+        self.db.flows.update_one({"_id": ObjectId(flow_id)}, {"$set": {"name": flow["name"], "current_version": next_version, "updated_at": now()}})
         return {"flow_id": flow_id, "version": next_version}
 
     def list_flows(self, user_id: str, workspace_id: str) -> list[dict[str, Any]]:

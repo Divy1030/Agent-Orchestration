@@ -31,6 +31,19 @@ TOOL_DEFINITIONS: tuple[dict[str, Any], ...] = (
         ],
     },
     {
+        "id": "mcp",
+        "label": "MCP Server Tool",
+        "description": "Call a discovered tool on a remote Model Context Protocol server.",
+        "category": "MCP",
+        "auth": "optional",
+        "operations": ["call"],
+        "fields": [
+            {"name": "name", "type": "string", "required": True},
+            {"name": "server_url", "type": "url", "required": True},
+            {"name": "functions", "type": "array", "required": True},
+        ],
+    },
+    {
         "id": "gmail",
         "label": "Gmail",
         "description": "Send, read, search, and manage emails.",
@@ -149,6 +162,22 @@ def validate_attached_tool(tool: dict[str, Any], node_id: str) -> None:
         raise ToolConfigurationError(f"node {node_id}: attached tool credential_id must be a string")
     if "approval_required" in tool and not isinstance(tool["approval_required"], bool):
         raise ToolConfigurationError(f"node {node_id}: attached tool approval_required must be boolean")
+    if tool["tool_id"] == "mcp":
+        if not isinstance(tool.get("server_url"), str) or not tool["server_url"].strip():
+            raise ToolConfigurationError(f"node {node_id}: MCP tools require server_url")
+        functions = tool.get("functions")
+        if functions is not None:
+            if not isinstance(functions, list) or not functions or len(functions) > 100:
+                raise ToolConfigurationError(f"node {node_id}: MCP server functions must be a non-empty list of at most 100 functions")
+            for function in functions:
+                if not isinstance(function, dict) or not isinstance(function.get("name"), str) or not function["name"].strip():
+                    raise ToolConfigurationError(f"node {node_id}: every MCP function requires a name")
+                if not isinstance(function.get("input_schema", {}), dict):
+                    raise ToolConfigurationError(f"node {node_id}: MCP function input_schema must be an object")
+        elif not isinstance(tool.get("mcp_tool_name"), str) or not tool["mcp_tool_name"].strip():
+            raise ToolConfigurationError(f"node {node_id}: MCP server requires functions")
+        elif not isinstance(tool.get("input_schema", {}), dict):
+            raise ToolConfigurationError(f"node {node_id}: MCP input_schema must be an object")
     parameters = tool.get("parameters", {})
     if not isinstance(parameters, dict):
         raise ToolConfigurationError(f"node {node_id}: attached tool parameters must be an object")

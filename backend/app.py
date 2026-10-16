@@ -13,6 +13,7 @@ from backend.flow_schema import DEMO_FLOW, FlowValidationError, canvas_graph, va
 from backend.runtime import FlowRuntime, SessionStore
 from backend.agent_executor import OpenRouterExecutor
 from backend.tool_registry import execute_tool, list_tools
+from backend.mcp_tools import McpConnectionError, call_mcp_tool, discover_mcp_tools, expand_mcp_servers
 from backend.auth_models import FlowSaveRequest, LoginRequest, PublicChatRequest, RegisterRequest, ResourceRequest, SessionCreateRequest, WorkspaceRequest
 from backend.mongo_store import MongoRuntimeStore, MongoStore, verify_password
 
@@ -52,6 +53,20 @@ async def execute_agent(node: dict[str, Any], messages: list[dict[str, str]]) ->
         config = {**agent.get("config", {}), **node_guidance,
                   "reply": config.get("reply", agent.get("config", {}).get("reply", ""))}
     attached_tools = [tool for tool in config.get("tools", []) if isinstance(tool, dict)]
+    mcp_servers = [tool for tool in attached_tools if tool.get("tool_id") == "mcp"]
+    mcp_tools = expand_mcp_servers(mcp_servers)
+    attached_tools = [tool for tool in attached_tools if tool.get("tool_id") != "mcp"]
+    approvals_enabled = os.getenv("ORCHESTRATION_TOOL_APPROVALS", "true").lower() == "true"
+    approval_required = [tool for tool in mcp_tools if tool.get("approval_required", True)] if approvals_enabled else []
+    live_mode = os.getenv("ORCHESTRATION_TOOL_MODE", "dry_run").lower() == "live"
+    runnable_mcp_tools = [tool for tool in mcp_tools if tool not in approval_required] if live_mode else []
+    blocked_mcp_tools = approval_required if live_mode else mcp_tools
+    mcp_status = "awaiting_approval" if live_mode else "dry_run"
+    mcp_reason = "This MCP tool requires approval before it can run." if live_mode else "MCP execution is disabled while ORCHESTRATION_TOOL_MODE is not live."
+    config["tool_results"] = [{"status": mcp_status, "server": tool.get("mcp_server_name") or tool.get("name") or "MCP Server",
+                               "function": tool.get("mcp_tool_name") or tool.get("name"), "reason": mcp_reason}
+                              for tool in blocked_mcp_tools]
+    mcp_tools = runnable_mcp_tools
     selected_tools = await select_attached_tools(attached_tools, messages)
     tool_results = []
     for attached_tool in selected_tools:
@@ -59,9 +74,9 @@ async def execute_agent(node: dict[str, Any], messages: list[dict[str, str]]) ->
                      "type": "tool", "label": attached_tool.get("label", attached_tool.get("tool_id", "Tool")),
                      "config": attached_tool}
         tool_results.append(await execute_tool(tool_node, messages))
-    if tool_results:
-        config["tool_results"] = tool_results
-    return await openrouter_executor.execute({**node, "config": config}, messages)
+    config["tool_results"].extend(tool_results)
+    return await openrouter_executor.execute({**node, "config": config}, messages,
+                                             mcp_tools=mcp_tools, mcp_tool_caller=call_mcp_tool)
 
 
 def _tool_matches_message(tool: dict[str, Any], message: str) -> bool:
@@ -119,6 +134,10 @@ class RunRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     node: str | None = None
     history: list[dict[str, str]] = Field(default_factory=list)
+
+
+class McpDiscoverRequest(BaseModel):
+    url: str = Field(min_length=1, max_length=2000)
 
 
 class ValidateRequest(BaseModel):
@@ -228,17 +247,18 @@ def tools_catalog() -> dict[str, Any]:
     return {"tools": list_tools()}
 
 
+@app.post("/api/mcp/discover")
+async def mcp_discover(payload: McpDiscoverRequest, request: Request) -> dict[str, Any]:
+    current_user(request)
+    try:
+        return {"tools": await discover_mcp_tools(payload.url)}
+    except McpConnectionError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @app.post("/api/auth/register")
 def register(request: RegisterRequest, response: Response) -> dict[str, Any]:
-    store = require_mongo()
-    try:
-        user = store.create_user(request.email, request.password, request.name)
-        store.create_workspace(user["id"], request.workspace_name)
-        token = store.issue_session(user["id"])
-    except ValueError as exc:
-        raise HTTPException(409, str(exc))
-    response.set_cookie(os.getenv("AUTH_COOKIE_NAME", "ao_session"), token, **auth_cookie_options())
-    return {"user": user}
+    raise HTTPException(403, "New registrations are temporarily closed while setup is in progress.")
 
 
 @app.post("/api/auth/login")
