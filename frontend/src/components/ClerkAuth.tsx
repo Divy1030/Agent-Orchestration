@@ -38,7 +38,7 @@ function ClerkBridge({ children }: { children: ReactNode }) {
 
 export function ClerkApplication({ children }: { children: ReactNode }) {
   if (!publishableKey) return <>{children}</>;
-  return <ClerkProvider publishableKey={publishableKey}>
+  return <ClerkProvider publishableKey={publishableKey} afterSignOutUrl="/">
     <ClerkBridge>{children}</ClerkBridge>
   </ClerkProvider>;
 }
@@ -65,6 +65,5 @@ export function ClerkSignInPanel() {
 export function ClerkAccountButton() {
   return <UserButton
     appearance={{ elements: { userButtonBox: 'clerk-account-button', userButtonTrigger: 'clerk-account-trigger' } }}
-    afterSignOutUrl="/"
   />;
 }
