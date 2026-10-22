@@ -59,6 +59,16 @@ class OpenRouterExecutor:
         workflow_instructions = str(config.get("workflow_instructions") or "").strip()
         routing_instructions = str(config.get("routing_instructions") or "").strip()
         instructions = [str(item).strip() for item in config.get("instructions", []) if str(item).strip()]
+        project_role = str(config.get("project_role") or "").strip().lower()
+        project_context = config.get("project_context") or {}
+        shared_project_context = config.get("shared_project_context") or {}
+        role_guidance = {
+            "planner": "Break work into small, ordered tasks, identify dependencies, and keep the implementation plan current.",
+            "coder": "Implement focused, maintainable changes and explain the files and behavior you changed.",
+            "tester": "Prioritize test coverage, reproducible checks, edge cases, and clear failure diagnostics.",
+            "reviewer": "Review changes for correctness, regressions, maintainability, and user-facing impact before approval.",
+            "security": "Look for credential exposure, authorization gaps, unsafe input, and dependency or data-handling risks.",
+        }
         attached_tools = [tool for tool in config.get("tools", []) if isinstance(tool, dict)]
         tool_results = [result for result in config.get("tool_results", []) if isinstance(result, dict)]
         guidance_sections = []
@@ -68,6 +78,34 @@ class OpenRouterExecutor:
             guidance_sections.append(f"Current node routing guidance:\n{routing_instructions}")
         if instructions:
             guidance_sections.append("Current node key points:\n" + "\n".join(f"- {item}" for item in instructions))
+        if project_role in role_guidance:
+            guidance_sections.append(f"Assigned Space project role: {project_role}. Role responsibility: {role_guidance[project_role]}")
+        if project_context:
+            context_lines = []
+            if project_context.get("project_goal"):
+                context_lines.append(f"Project goal: {project_context['project_goal']}")
+            for label in ("guidelines", "patterns", "instructions"):
+                values = [str(item).strip() for item in project_context.get(label, []) if str(item).strip()]
+                if values:
+                    context_lines.append(f"{label.title()}:\n" + "\n".join(f"- {item}" for item in values[:30]))
+            if context_lines:
+                guidance_sections.append("Shared Space project context (follow these unless the current task explicitly overrides them):\n" + "\n".join(context_lines))
+        if shared_project_context:
+            shared_lines = []
+            for item in shared_project_context.get("memory", [])[:50]:
+                shared_lines.append(f"- [{item.get('kind', 'fact')}] {item.get('content', '')}")
+            if shared_lines:
+                guidance_sections.append("Persistent project memory (treat as project history; do not invent missing facts):\n" + "\n".join(shared_lines))
+            skill_lines = []
+            for skill in shared_project_context.get("skills", [])[:30]:
+                instructions = "; ".join(str(value) for value in skill.get("instructions", [])[:10])
+                patterns = "; ".join(str(value) for value in skill.get("patterns", [])[:10])
+                skill_lines.append(f"- {skill.get('name')}: {skill.get('description', '')} Instructions: {instructions}. Patterns: {patterns}.")
+            if skill_lines:
+                guidance_sections.append("Reusable Space skills and patterns (follow when relevant):\n" + "\n".join(skill_lines))
+            task_lines = [f"- {task.get('title')} [{task.get('status')}/{task.get('priority')}]" for task in shared_project_context.get("open_tasks", [])[:50]]
+            if task_lines:
+                guidance_sections.append("Open project tasks (keep work aligned with these):\n" + "\n".join(task_lines))
         if attached_tools:
             guidance_sections.append("Tools attached to this node:\n" + "\n".join(
                 f"- {tool.get('tool_id')}: use only when the request matches this node's configured tool behavior"

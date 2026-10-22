@@ -13,6 +13,10 @@ services:
         sync: false
       - key: JEV_API_KEY
         sync: false
+      - key: CREDENTIAL_ENCRYPTION_KEY
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
       - key: JEV_MOCK
         value: "false"
       - key: AUTH_COOKIE_SECURE

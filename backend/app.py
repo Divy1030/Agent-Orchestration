@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from copy import deepcopy
 from typing import Any
 
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from backend.flow_schema import DEMO_FLOW, FlowValidationError, canvas_graph, validate_flow
@@ -14,17 +16,40 @@ from backend.runtime import FlowRuntime, SessionStore
 from backend.agent_executor import OpenRouterExecutor
 from backend.tool_registry import execute_tool, list_tools
 from backend.mcp_tools import McpConnectionError, call_mcp_tool, discover_mcp_tools, expand_mcp_servers
-from backend.auth_models import FlowSaveRequest, LoginRequest, PublicChatRequest, RegisterRequest, ResourceRequest, SessionCreateRequest, WorkspaceRequest
+from backend.auth_models import (FlowSaveRequest, GitHubBranchRequest, GitHubCommitRequest, GitHubPullRequestRequest,
+                                  LoginRequest, PublicChatRequest, RegisterRequest, ResourceRequest, SessionCreateRequest,
+                                  SpaceContextRequest,
+                                  SpaceMemoryRequest, SpaceSkillRequest, SpaceTaskRequest, SpaceTaskStatusRequest,
+                                  SpaceApprovalRequest,
+                                  SpaceAgentRequest, SpaceAgentRoleRequest, SpaceJoinCodeRequest, SpaceJoinRequest, SpaceMemberRoleRequest,
+                                  SpaceProjectRequest, WorkspaceRequest)
 from backend.mongo_store import MongoRuntimeStore, MongoStore, now as mongo_store_now, verify_password
 from backend.clerk_auth import ClerkAuthError, clerk_user_from_request
 from backend.secure_store import decrypt_secret, encrypt_secret
+from backend.github_service import (GitHubAuthorizationError, clerk_github_token, commit_files, create_branch,
+                                    create_pull_request, github_app_install_url, github_app_installation_token,
+                                    github_app_state, github_app_state_payload, read_file, repository_snapshot,
+                                    verify_repository)
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
 
 app = FastAPI(title="Agent Orchestration Base", version="0.1.0")
-# Reflect any HTTP(S) origin so credentialed browser requests work. A literal
-# allow_origins=["*"] is incompatible with credentialed CORS in browsers.
-app.add_middleware(CORSMiddleware, allow_origin_regex=r"https?://.*", allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+
+def cors_origins() -> list[str]:
+    """Return an explicit allow-list; never reflect arbitrary credentialed origins."""
+    configured = os.getenv("CORS_ALLOWED_ORIGINS", "")
+    configured += "," + os.getenv("FRONTEND_URL", "")
+    origins = {origin.strip().rstrip("/") for origin in configured.split(",") if origin.strip()}
+    if not origins:
+        origins = {"http://localhost:5173", "http://127.0.0.1:5173"}
+    return sorted(origins)
+
+
+app.add_middleware(CORSMiddleware, allow_origins=cors_origins(), allow_credentials=True,
+                   allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                   allow_headers=["Authorization", "Content-Type"])
 
 FLOW = validate_flow(DEMO_FLOW)
 GRAPH = canvas_graph(FLOW)
@@ -83,9 +108,25 @@ async def execute_agent(node: dict[str, Any], messages: list[dict[str, str]]) ->
         row = mongo.db.workspace_credentials.find_one({"workspace_id": __import__("bson").ObjectId(workspace_id), "provider": "openrouter"}) if mongo.configured else None
         if row:
             workspace_key = decrypt_secret(row["encrypted_value"])
-    return await openrouter_executor.execute({**node, "config": config}, messages,
-                                             mcp_tools=mcp_tools, mcp_tool_caller=call_mcp_tool,
-                                             api_key=workspace_key)
+        assignment = mongo.db.space_agents.find_one({"workspace_id": __import__("bson").ObjectId(workspace_id), "agent_id": __import__("bson").ObjectId(agent_id)}) if mongo.configured and agent_id else None
+        if assignment:
+            config["project_role"] = assignment.get("role", "coder")
+        project_context = mongo.db.space_contexts.find_one({"workspace_id": __import__("bson").ObjectId(workspace_id)}, {"_id": 0}) if mongo.configured else None
+        if project_context:
+            config["project_context"] = {key: project_context.get(key, []) for key in ("project_goal", "guidelines", "patterns", "instructions")}
+        if mongo.configured:
+            config["shared_project_context"] = mongo.shared_agent_context(str(workspace_id))
+    if workspace_id and agent_id and mongo.configured:
+        mongo.set_agent_presence(str(workspace_id), str(agent_id), "working")
+        mongo.record_space_activity(str(workspace_id), "agent_started", "Agent started working on a workflow", str(agent_id))
+    try:
+        return await openrouter_executor.execute({**node, "config": config}, messages,
+                                                 mcp_tools=mcp_tools, mcp_tool_caller=call_mcp_tool,
+                                                 api_key=workspace_key)
+    finally:
+        if workspace_id and agent_id and mongo.configured:
+            mongo.set_agent_presence(str(workspace_id), str(agent_id), "idle")
+            mongo.record_space_activity(str(workspace_id), "agent_completed", "Agent finished its workflow turn", str(agent_id))
 
 
 def _tool_matches_message(tool: dict[str, Any], message: str) -> bool:
@@ -171,6 +212,11 @@ class WorkspaceCredentialRequest(BaseModel):
     label: str = Field(default="", max_length=120)
 
 
+class WorkspaceUpdateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    role: str = Field(pattern=r"^(owner|admin|member)$")
+
+
 def require_mongo() -> MongoStore:
     if not mongo.configured:
         raise HTTPException(503, "MONGODB_URI is not configured")
@@ -202,17 +248,6 @@ def current_user(request: Request) -> dict[str, Any]:
 
 def jev_url() -> str:
     return os.getenv("JEV_BASE_URL", "https://api.typesafe.ai/v1").rstrip("/") + "/systemone"
-
-
-def workspace_provider_key(workspace_id: str | None, provider: str) -> str | None:
-    if not workspace_id or not mongo.configured:
-        return None
-    try:
-        from bson import ObjectId
-        row = mongo.db.workspace_credentials.find_one({"workspace_id": ObjectId(workspace_id), "provider": provider})
-        return decrypt_secret(row["encrypted_value"]) if row else None
-    except Exception:
-        return None
 
 
 async def choose_edge(graph: dict[str, Any], node_id: str, message: str, history: list[dict[str, str]]) -> dict[str, Any]:
@@ -355,7 +390,513 @@ def list_workspaces(request: Request) -> dict[str, Any]:
 @app.post("/api/workspaces")
 def create_workspace(request: WorkspaceRequest, http_request: Request) -> dict[str, Any]:
     user = current_user(http_request)
-    return {"workspace": mongo.create_workspace(user["id"], request.name)}
+    try:
+        return {"workspace": mongo.create_workspace(user["id"], request.name)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@app.post("/api/spaces/join")
+def join_space(request: SpaceJoinRequest, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        return {"space": mongo.join_workspace(user["id"], request.code)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/spaces/{space_id}/join-code/rotate")
+def rotate_space_join_code(space_id: str, request: SpaceJoinCodeRequest, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    if not request.github_collaborator_confirmed:
+        raise HTTPException(422, "Confirm the invited user has been added to the GitHub repository before generating a join code")
+    try:
+        return {"space": mongo.regenerate_join_code(user["id"], space_id)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@app.get("/api/spaces/{space_id}/members")
+def list_space_members(space_id: str, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        return {"members": mongo.space_members(user["id"], space_id)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@app.get("/api/spaces/{space_id}/agents")
+def list_space_agents(space_id: str, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        return {"agents": mongo.space_agents(user["id"], space_id)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@app.get("/api/spaces/{space_id}/project")
+def get_space_project_dashboard(space_id: str, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        return {"project": mongo.space_project_dashboard(user["id"], space_id)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@app.get("/api/spaces/{space_id}/context")
+def get_space_context(space_id: str, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        return {"context": mongo.space_context(user["id"], space_id)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@app.put("/api/spaces/{space_id}/context")
+def save_space_context(space_id: str, request: SpaceContextRequest, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    clean = {key: [item.strip() for item in values if item.strip()][:30] if isinstance(values, list) else values.strip()
+             for key, values in request.model_dump().items()}
+    try:
+        return {"context": mongo.save_space_context(user["id"], space_id, clean)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@app.get("/api/spaces/{space_id}/memory")
+def get_space_memory(space_id: str, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        return {"memory": mongo.space_memory(user["id"], space_id)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@app.post("/api/spaces/{space_id}/memory")
+def add_space_memory(space_id: str, request: SpaceMemoryRequest, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        return {"memory": mongo.add_space_memory(user["id"], space_id, request.kind, request.content, request.source)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@app.delete("/api/spaces/{space_id}/memory/{memory_id}")
+def delete_space_memory(space_id: str, memory_id: str, http_request: Request) -> dict[str, bool]:
+    user = current_user(http_request)
+    try:
+        mongo.delete_space_memory(user["id"], space_id, memory_id)
+        return {"ok": True}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.get("/api/spaces/{space_id}/skills")
+def get_space_skills(space_id: str, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        return {"skills": mongo.space_skills(user["id"], space_id)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@app.put("/api/spaces/{space_id}/skills")
+def save_space_skill(space_id: str, request: SpaceSkillRequest, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        return {"skill": mongo.save_space_skill(user["id"], space_id, request.model_dump())}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@app.delete("/api/spaces/{space_id}/skills/{skill_id}")
+def delete_space_skill(space_id: str, skill_id: str, http_request: Request) -> dict[str, bool]:
+    user = current_user(http_request)
+    try:
+        mongo.delete_space_skill(user["id"], space_id, skill_id)
+        return {"ok": True}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.get("/api/spaces/{space_id}/tasks")
+def get_space_tasks(space_id: str, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        return {"tasks": mongo.space_tasks(user["id"], space_id)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@app.post("/api/spaces/{space_id}/tasks")
+def create_space_task(space_id: str, request: SpaceTaskRequest, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        return {"task": mongo.create_space_task(user["id"], space_id, request.model_dump())}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.patch("/api/spaces/{space_id}/tasks/{task_id}")
+def update_space_task(space_id: str, task_id: str, request: SpaceTaskStatusRequest, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        return {"task": mongo.update_space_task_status(user["id"], space_id, task_id, request.status)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.get("/api/spaces/{space_id}/approvals")
+def get_space_approvals(space_id: str, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        return {"approvals": mongo.space_approvals(user["id"], space_id)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@app.post("/api/spaces/{space_id}/approvals")
+def request_space_approval(space_id: str, request: SpaceApprovalRequest, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        return {"approval": mongo.request_space_approval(user["id"], space_id, request.model_dump())}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@app.post("/api/spaces/{space_id}/approvals/{approval_id}/{decision}")
+def decide_space_approval(space_id: str, approval_id: str, decision: str, http_request: Request) -> dict[str, Any]:
+    if decision not in {"approved", "rejected"}:
+        raise HTTPException(422, "Approval decision must be approved or rejected")
+    user = current_user(http_request)
+    try:
+        return {"approval": mongo.decide_space_approval(user["id"], space_id, approval_id, decision)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.get("/api/spaces/{space_id}/agents/available")
+def list_available_space_agents(space_id: str, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        return {"agents": mongo.available_agents_for_space(user["id"], space_id)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@app.post("/api/spaces/{space_id}/agents")
+def assign_space_agent(space_id: str, request: SpaceAgentRequest, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        return {"agent": mongo.assign_space_agent(user["id"], space_id, request.agent_id, request.role)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.patch("/api/spaces/{space_id}/agents/{agent_id}")
+def update_space_agent_role(space_id: str, agent_id: str, request: SpaceAgentRoleRequest, http_request: Request) -> dict[str, bool]:
+    user = current_user(http_request)
+    try:
+        mongo.update_space_agent_role(user["id"], space_id, agent_id, request.role)
+        return {"ok": True}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.delete("/api/spaces/{space_id}/agents/{agent_id}")
+def remove_space_agent(space_id: str, agent_id: str, http_request: Request) -> dict[str, bool]:
+    user = current_user(http_request)
+    try:
+        mongo.remove_space_agent(user["id"], space_id, agent_id)
+        return {"ok": True}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@app.get("/api/spaces/{space_id}")
+def get_space_detail(space_id: str, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        return {"space": mongo.space_detail(user["id"], space_id)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@app.put("/api/spaces/{space_id}/project")
+def save_space_project(space_id: str, request: SpaceProjectRequest, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        return {"project": mongo.save_space_project(user["id"], space_id, request.repository_url, request.default_branch)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.delete("/api/spaces/{space_id}/project")
+def remove_space_project(space_id: str, http_request: Request) -> dict[str, bool]:
+    user = current_user(http_request)
+    try:
+        mongo.remove_space_project(user["id"], space_id)
+        return {"ok": True}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@app.post("/api/spaces/{space_id}/github/verify")
+def verify_space_github(space_id: str, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    clerk_user_id = mongo.clerk_identity_for_user(user["id"])
+    if not clerk_user_id:
+        raise HTTPException(409, "GitHub authorization requires a Clerk-linked account")
+    try:
+        detail = mongo.space_detail(user["id"], space_id)
+        if detail.get("role") not in {"owner", "admin"}:
+            raise PermissionError("Only Space owners and admins can authorize GitHub")
+        project = detail.get("project")
+        if not project:
+            raise GitHubAuthorizationError("Save a GitHub repository before authorizing it", 422)
+        token, scopes = clerk_github_token(clerk_user_id)
+        repository = verify_repository(project["repository_url"], token)
+        return {"project": mongo.authorize_space_github(user["id"], space_id, encrypt_secret(token), repository, scopes)}
+    except GitHubAuthorizationError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@app.get("/api/spaces/{space_id}/github/app/install")
+def start_space_github_app_install(space_id: str, http_request: Request) -> dict[str, str]:
+    user = current_user(http_request)
+    try:
+        from bson import ObjectId
+        detail = mongo.space_detail(user["id"], space_id)
+        if not detail.get("project"):
+            raise GitHubAuthorizationError("Save a GitHub repository before installing the GitHub App", 422)
+        membership = mongo.db.memberships.find_one({"workspace_id": ObjectId(space_id), "user_id": ObjectId(user["id"])})
+        if not membership or membership.get("role") not in {"owner", "admin"}:
+            raise PermissionError("Only Space owners and admins can authorize GitHub")
+        state = github_app_state(user["id"], space_id)
+        return {"install_url": github_app_install_url(state)}
+    except GitHubAuthorizationError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@app.get("/api/github/app/callback")
+def finish_github_app_install(state: str, installation_id: str | None = None, setup_action: str | None = None) -> Response:
+    frontend = (os.getenv("FRONTEND_URL", "").strip() or "http://localhost:5173").rstrip("/")
+    try:
+        payload = github_app_state_payload(state)
+        space_id = payload["space_id"]
+        user_id = payload["user_id"]
+        detail = mongo.space_detail(user_id, space_id)
+        project = detail.get("project")
+        if not project:
+            raise GitHubAuthorizationError("Save a GitHub repository before authorizing it", 422)
+        if setup_action == "uninstall":
+            raise GitHubAuthorizationError("The GitHub App installation was cancelled", 400)
+        if not installation_id:
+            raise GitHubAuthorizationError("GitHub did not return an installation", 400)
+        token, repository = github_app_installation_token(installation_id, project["repository_url"])
+        updated = mongo.authorize_space_github(user_id, space_id, encrypt_secret(token), repository,
+                                               ["github_app", "contents:write", "pull_requests:write"])
+        from bson import ObjectId
+        mongo.db.space_projects.update_one({"workspace_id": ObjectId(space_id)}, {"$set": {
+            "github_auth_type": "github_app", "github_installation_id": str(installation_id)
+        }})
+        del updated
+        return RedirectResponse(f"{frontend}/spaces?github=authorized&space_id={space_id}", status_code=303)
+    except (GitHubAuthorizationError, PermissionError, ValueError, RuntimeError) as exc:
+        status = exc.status_code if isinstance(exc, GitHubAuthorizationError) else 400
+        from urllib.parse import quote
+        message = quote(str(exc), safe="")
+        space_id = ""
+        try:
+            space_id = str(github_app_state_payload(state).get("space_id", ""))
+        except GitHubAuthorizationError:
+            pass
+        return RedirectResponse(f"{frontend}/spaces?github=error&space_id={space_id}&message={message}", status_code=303)
+
+
+@app.get("/api/spaces/{space_id}/github/preflight")
+def preflight_space_github(space_id: str, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        mongo.space_detail(user["id"], space_id)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    clerk_user_id = mongo.clerk_identity_for_user(user["id"])
+    if not clerk_user_id:
+        return {"connected": False, "message": "This account is not linked to Clerk GitHub OAuth."}
+    try:
+        _, scopes = clerk_github_token(clerk_user_id)
+        return {"connected": True, "scopes": scopes}
+    except GitHubAuthorizationError as exc:
+        if exc.status_code == 409:
+            return {"connected": False, "message": str(exc)}
+        raise HTTPException(exc.status_code, str(exc)) from exc
+
+
+@app.post("/api/spaces/{space_id}/github/disconnect")
+def disconnect_space_github(space_id: str, http_request: Request) -> dict[str, bool]:
+    user = current_user(http_request)
+    try:
+        mongo.disconnect_space_github(user["id"], space_id)
+        return {"ok": True}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@app.post("/api/spaces/{space_id}/github/test")
+def test_space_github(space_id: str, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        token, project = mongo.github_token_for_space(user["id"], space_id)
+        repository = verify_repository(project["repository_url"], token)
+        return {"ok": True, "repository": repository}
+    except GitHubAuthorizationError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+def github_mutation_context(user_id: str, space_id: str) -> tuple[str, dict[str, Any]]:
+    detail = mongo.space_detail(user_id, space_id)
+    if detail.get("role") not in {"owner", "admin"}:
+        raise PermissionError("Only Space owners and admins can change the repository")
+    token, project = mongo.github_token_for_space(user_id, space_id)
+    return token, project
+
+
+@app.get("/api/spaces/{space_id}/github/snapshot")
+def get_space_github_snapshot(space_id: str, http_request: Request, branch: str | None = None) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        token, project = mongo.github_token_for_space(user["id"], space_id)
+        return {"snapshot": repository_snapshot(project["repository_url"], token, branch)}
+    except GitHubAuthorizationError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@app.get("/api/spaces/{space_id}/github/file")
+def get_space_github_file(space_id: str, path: str, http_request: Request, branch: str | None = None) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        token, project = mongo.github_token_for_space(user["id"], space_id)
+        return {"file": read_file(project["repository_url"], token, path, branch)}
+    except GitHubAuthorizationError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@app.post("/api/spaces/{space_id}/github/branches")
+def create_space_github_branch(space_id: str, request: GitHubBranchRequest, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        token, project = github_mutation_context(user["id"], space_id)
+        return {"branch": create_branch(project["repository_url"], token, request.branch, request.from_branch)}
+    except GitHubAuthorizationError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@app.post("/api/spaces/{space_id}/github/commits")
+def commit_space_github_files(space_id: str, request: GitHubCommitRequest, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        token, project = github_mutation_context(user["id"], space_id)
+        return {"commit": commit_files(project["repository_url"], token, request.branch, request.message, request.files)}
+    except GitHubAuthorizationError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@app.post("/api/spaces/{space_id}/github/pull-requests")
+def create_space_github_pull_request(space_id: str, request: GitHubPullRequestRequest, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        token, project = github_mutation_context(user["id"], space_id)
+        return {"pull_request": create_pull_request(project["repository_url"], token, request.title, request.body, request.head, request.base)}
+    except GitHubAuthorizationError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@app.patch("/api/spaces/{space_id}/members/{member_id}")
+def update_space_member_role(space_id: str, member_id: str, request: SpaceMemberRoleRequest, http_request: Request) -> dict[str, bool]:
+    user = current_user(http_request)
+    try:
+        mongo.update_space_member_role(user["id"], space_id, member_id, request.role)
+        return {"ok": True}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.patch("/api/workspaces/{workspace_id}")
+def update_workspace(workspace_id: str, request: WorkspaceUpdateRequest, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        return {"workspace": mongo.update_workspace(user["id"], workspace_id, request.name, request.role)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @app.get("/api/billing")
@@ -689,7 +1230,10 @@ async def public_workflow_chat(slug: str, request: PublicChatRequest, http_reque
         if not session or session.get("flow_id") != published["flow_id"]:
             raise HTTPException(404, "Chat session not found")
     try:
+        store.consume_workspace_execution(published["workspace_id"])
         result = await runtime.turn(flow, session_id, request.message, runtime_route)
+    except PermissionError as exc:
+        raise HTTPException(402, str(exc)) from exc
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"workflow": published["slug"], "version": published["version"], **result}
@@ -716,7 +1260,11 @@ async def send_session_message(session_id: str, request: MessageRequest, http_re
             if not stored_flow or not stored_flow.get("flow"):
                 raise ValueError("Workflow version is missing")
             flow = validate_flow(stored_flow["flow"])
+        store = require_mongo()
+        store.consume_workspace_execution(str(stored_flow.get("workspace_id")))
         return await runtime.turn(flow, session_id, request.message, runtime_route)
+    except PermissionError as exc:
+        raise HTTPException(402, str(exc)) from exc
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(400, str(exc))
 
