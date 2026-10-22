@@ -796,6 +796,22 @@ def github_mutation_context(user_id: str, space_id: str) -> tuple[str, dict[str,
     return token, project
 
 
+def github_contributor_context(user_id: str, space_id: str) -> tuple[str, dict[str, Any]]:
+    detail = mongo.space_detail(user_id, space_id)
+    if detail.get("role") not in {"owner", "admin", "member"}:
+        raise PermissionError("Only Space contributors can create branches or pull requests")
+    token, project = mongo.github_token_for_space(user_id, space_id)
+    return token, project
+
+
+def github_owner_commit_context(user_id: str, space_id: str) -> tuple[str, dict[str, Any]]:
+    detail = mongo.space_detail(user_id, space_id)
+    if detail.get("role") != "owner":
+        raise PermissionError("Only the Space owner can commit directly; create a pull request instead")
+    token, project = mongo.github_token_for_space(user_id, space_id)
+    return token, project
+
+
 @app.get("/api/spaces/{space_id}/github/snapshot")
 def get_space_github_snapshot(space_id: str, http_request: Request, branch: str | None = None) -> dict[str, Any]:
     user = current_user(http_request)
@@ -832,7 +848,7 @@ def get_space_github_file(space_id: str, path: str, http_request: Request, branc
 def create_space_github_branch(space_id: str, request: GitHubBranchRequest, http_request: Request) -> dict[str, Any]:
     user = current_user(http_request)
     try:
-        token, project = github_mutation_context(user["id"], space_id)
+        token, project = github_contributor_context(user["id"], space_id)
         return {"branch": create_branch(project["repository_url"], token, request.branch, request.from_branch)}
     except GitHubAuthorizationError as exc:
         raise HTTPException(exc.status_code, str(exc)) from exc
@@ -848,7 +864,7 @@ def create_space_github_branch(space_id: str, request: GitHubBranchRequest, http
 def commit_space_github_files(space_id: str, request: GitHubCommitRequest, http_request: Request) -> dict[str, Any]:
     user = current_user(http_request)
     try:
-        token, project = github_mutation_context(user["id"], space_id)
+        token, project = github_owner_commit_context(user["id"], space_id)
         return {"commit": commit_files(project["repository_url"], token, request.branch, request.message, request.files)}
     except GitHubAuthorizationError as exc:
         raise HTTPException(exc.status_code, str(exc)) from exc
@@ -864,7 +880,7 @@ def commit_space_github_files(space_id: str, request: GitHubCommitRequest, http_
 def create_space_github_pull_request(space_id: str, request: GitHubPullRequestRequest, http_request: Request) -> dict[str, Any]:
     user = current_user(http_request)
     try:
-        token, project = github_mutation_context(user["id"], space_id)
+        token, project = github_contributor_context(user["id"], space_id)
         return {"pull_request": create_pull_request(project["repository_url"], token, request.title, request.body, request.head, request.base)}
     except GitHubAuthorizationError as exc:
         raise HTTPException(exc.status_code, str(exc)) from exc
