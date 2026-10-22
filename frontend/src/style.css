@@ -2630,11 +2630,32 @@
      white-space: pre-wrap
  }
 
- .settings-grid {
+.settings-grid {
      display: grid;
      grid-template-columns: 1fr 1fr;
      gap: 18px
- }
+}
+
+/* Shared square action language for the settings cards. The size is explicit
+   so the component stays reusable in dense rows without becoming pill-shaped. */
+.square-button {
+  border-radius: 4px;
+  min-height: 40px;
+  padding: 0 16px;
+  font: inherit;
+  font-weight: 600;
+  letter-spacing: .01em;
+  transition: background-color .16s ease, border-color .16s ease, transform .16s ease;
+}
+.square-button-compact { min-height: 32px; padding: 0 10px; font-size: 12px; }
+.square-button-primary { background: var(--accent, #315bb5); color: #fff; border: 1px solid transparent; }
+.square-button-quiet { background: transparent; color: var(--text, #e8edf7); border: 1px solid var(--line, #34415a); }
+.square-button-danger { background: transparent; color: #e58d94; border: 1px solid rgba(229, 141, 148, .5); }
+.square-button:hover:not(:disabled) { transform: translateY(-1px); }
+.square-button:focus-visible { outline: 2px solid #8aaeff; outline-offset: 2px; }
+.square-button:disabled { opacity: .5; cursor: not-allowed; transform: none; }
+.settings-action-group { display: inline-flex; gap: 8px; align-items: center; }
+.settings-provider-card, .settings-subscription-card { min-height: 294px; }
 
  .settings-form {
      display: grid;
@@ -2649,12 +2670,24 @@
      font-weight: 650
  }
 
- .settings-form input {
+.settings-form input {
      display: block;
      width: 100%;
      margin-top: 6px;
      border: 1px solid #cad5e3;
      border-radius: 8px;
+     padding: 10px;
+     background: #f8fafc;
+     color: #526176;
+     font: inherit
+ }
+
+ .settings-form select {
+     display: block;
+     width: 100%;
+     margin-top: 6px;
+     border: 1px solid #cad5e3;
+     border-radius: 4px;
      padding: 10px;
      background: #f8fafc;
      color: #526176;

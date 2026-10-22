@@ -15,8 +15,9 @@ from backend.agent_executor import OpenRouterExecutor
 from backend.tool_registry import execute_tool, list_tools
 from backend.mcp_tools import McpConnectionError, call_mcp_tool, discover_mcp_tools, expand_mcp_servers
 from backend.auth_models import FlowSaveRequest, LoginRequest, PublicChatRequest, RegisterRequest, ResourceRequest, SessionCreateRequest, WorkspaceRequest
-from backend.mongo_store import MongoRuntimeStore, MongoStore, verify_password
+from backend.mongo_store import MongoRuntimeStore, MongoStore, now as mongo_store_now, verify_password
 from backend.clerk_auth import ClerkAuthError, clerk_user_from_request
+from backend.secure_store import decrypt_secret, encrypt_secret
 
 load_dotenv()
 
@@ -76,8 +77,15 @@ async def execute_agent(node: dict[str, Any], messages: list[dict[str, str]]) ->
                      "config": attached_tool}
         tool_results.append(await execute_tool(tool_node, messages))
     config["tool_results"].extend(tool_results)
+    workspace_id = node.get("workspace_id") or config.get("workspace_id")
+    workspace_key = None
+    if workspace_id:
+        row = mongo.db.workspace_credentials.find_one({"workspace_id": __import__("bson").ObjectId(workspace_id), "provider": "openrouter"}) if mongo.configured else None
+        if row:
+            workspace_key = decrypt_secret(row["encrypted_value"])
     return await openrouter_executor.execute({**node, "config": config}, messages,
-                                             mcp_tools=mcp_tools, mcp_tool_caller=call_mcp_tool)
+                                             mcp_tools=mcp_tools, mcp_tool_caller=call_mcp_tool,
+                                             api_key=workspace_key)
 
 
 def _tool_matches_message(tool: dict[str, Any], message: str) -> bool:
@@ -153,6 +161,16 @@ class AgentConnectionRequest(BaseModel):
     agent_id: str | None = None
 
 
+class PromoCodeRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=64)
+
+
+class WorkspaceCredentialRequest(BaseModel):
+    provider: str = Field(pattern=r"^openrouter$")
+    key: str = Field(min_length=8, max_length=4096)
+    label: str = Field(default="", max_length=120)
+
+
 def require_mongo() -> MongoStore:
     if not mongo.configured:
         raise HTTPException(503, "MONGODB_URI is not configured")
@@ -184,6 +202,17 @@ def current_user(request: Request) -> dict[str, Any]:
 
 def jev_url() -> str:
     return os.getenv("JEV_BASE_URL", "https://api.typesafe.ai/v1").rstrip("/") + "/systemone"
+
+
+def workspace_provider_key(workspace_id: str | None, provider: str) -> str | None:
+    if not workspace_id or not mongo.configured:
+        return None
+    try:
+        from bson import ObjectId
+        row = mongo.db.workspace_credentials.find_one({"workspace_id": ObjectId(workspace_id), "provider": provider})
+        return decrypt_secret(row["encrypted_value"]) if row else None
+    except Exception:
+        return None
 
 
 async def choose_edge(graph: dict[str, Any], node_id: str, message: str, history: list[dict[str, str]]) -> dict[str, Any]:
@@ -327,6 +356,79 @@ def list_workspaces(request: Request) -> dict[str, Any]:
 def create_workspace(request: WorkspaceRequest, http_request: Request) -> dict[str, Any]:
     user = current_user(http_request)
     return {"workspace": mongo.create_workspace(user["id"], request.name)}
+
+
+@app.get("/api/billing")
+def billing(http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    return mongo.subscription_for_user(user["id"])
+
+
+@app.post("/api/billing/promo")
+def redeem_promo(request: PromoCodeRequest, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        subscription = mongo.redeem_promo(user["id"], request.code)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"subscription": subscription}
+
+
+@app.get("/api/workspaces/{workspace_id}/credentials")
+def list_workspace_credentials(workspace_id: str, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        return {"credentials": mongo.workspace_credentials(user["id"], workspace_id)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@app.put("/api/workspaces/{workspace_id}/credentials")
+def rotate_workspace_credential(workspace_id: str, request: WorkspaceCredentialRequest, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        result = mongo.save_workspace_credential(user["id"], workspace_id, request.provider,
+                                                 encrypt_secret(request.key), request.label.strip() or request.provider.title(),
+                                                 request.key[-4:])
+        return {"credential": result}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@app.post("/api/workspaces/{workspace_id}/credentials/{provider}/test")
+async def test_workspace_credential(workspace_id: str, provider: str, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        row = mongo.get_workspace_credential(user["id"], workspace_id, provider)
+        if not row:
+            raise HTTPException(404, "Credential not found")
+        key = decrypt_secret(row["encrypted_value"])
+        if provider == "openrouter":
+            url, headers = "https://openrouter.ai/api/v1/models", {"Authorization": f"Bearer {key}"}
+        else:
+            raise HTTPException(400, "Unsupported provider")
+        async with httpx.AsyncClient(timeout=httpx.Timeout(8, connect=3)) as client:
+            response = await client.get(url, headers=headers)
+        response.raise_for_status()
+        from bson import ObjectId
+        mongo.db.workspace_credentials.update_one({"_id": row["_id"]}, {"$set": {"last_tested_at": mongo_store_now()}})
+        return {"ok": True, "provider": provider}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(502, f"{provider.title()} key test failed") from exc
+
+
+@app.delete("/api/workspaces/{workspace_id}/credentials/{provider}")
+def remove_workspace_credential(workspace_id: str, provider: str, http_request: Request) -> dict[str, bool]:
+    user = current_user(http_request)
+    try:
+        mongo.remove_workspace_credential(user["id"], workspace_id, provider)
+        return {"ok": True}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
 
 
 @app.post("/api/workspaces/{workspace_id}/flows")
@@ -551,6 +653,7 @@ async def create_session(request: SessionCreateRequest, http_request: Request) -
             # can reload the exact published workflow instead of DEMO_FLOW.
             flow["id"] = request.flow_id
             flow = validate_flow(flow)
+            flow["workspace_id"] = stored_flow["workspace_id"]
         except (PermissionError, ValueError) as exc:
             raise HTTPException(422, str(exc))
     session = await runtime.start(flow)
@@ -576,6 +679,7 @@ async def public_workflow_chat(slug: str, request: PublicChatRequest, http_reque
     flow = deepcopy(published["flow"])
     flow["id"] = published["flow_id"]
     flow = validate_flow(flow)
+    flow["workspace_id"] = published["workspace_id"]
     session_id = request.session_id
     if not session_id:
         session = await runtime.start(flow)

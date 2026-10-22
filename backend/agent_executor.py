@@ -42,11 +42,13 @@ class OpenRouterExecutor:
 
     async def execute(self, node: dict[str, Any], messages: list[dict[str, str]], *,
                       mcp_tools: list[dict[str, Any]] | None = None,
-                      mcp_tool_caller: Callable[[str, str, dict[str, Any]], Awaitable[dict[str, Any]]] | None = None) -> dict[str, Any]:
+                      mcp_tool_caller: Callable[[str, str, dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
+                      api_key: str | None = None) -> dict[str, Any]:
         config = node.get("config", {})
         fallback = str(config.get("reply", ""))
         mcp_tools = mcp_tools or []
-        if not self.api_key:
+        provider_key = api_key or self.api_key
+        if not provider_key:
             if mcp_tools:
                 raise RuntimeError("MCP tool calls require OPENROUTER_API_KEY and a model that supports tool calling.")
             latest_user_message = next((item.get("content", "").strip() for item in reversed(messages) if item.get("role") == "user"), "")
@@ -125,7 +127,7 @@ class OpenRouterExecutor:
                         body["tool_choice"] = "auto"
                     response = await client.post(
                         "https://openrouter.ai/api/v1/chat/completions",
-                        headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json",
+                        headers={"Authorization": f"Bearer {provider_key}", "Content-Type": "application/json",
                                  "HTTP-Referer": os.getenv("OPENROUTER_SITE_URL", "http://localhost:5173"),
                                  "X-Title": os.getenv("OPENROUTER_SITE_NAME", "Agent Orchestration")},
                         json=body,

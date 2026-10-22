@@ -71,11 +71,21 @@ class MongoStore:
         self._db.agents.create_index([("workspace_id", 1), ("name", 1)], unique=True)
         self._db.connectors.create_index([("workspace_id", 1), ("name", 1)], unique=True)
         self._db.credential_refs.create_index([("workspace_id", 1), ("name", 1)], unique=True)
+        self._db.workspace_credentials.create_index([("workspace_id", 1), ("provider", 1)], unique=True)
+        self._db.promo_redemptions.create_index([("user_id", 1), ("code", 1)], unique=True)
 
     def create_user(self, email: str, password: str, name: str) -> dict[str, Any]:
         from pymongo.errors import DuplicateKeyError
         doc = {"email": email.lower().strip(), "name": name.strip() or email.split("@")[0],
-               "password_hash": hash_password(password), "created_at": now()}
+               "password_hash": hash_password(password), "created_at": now(),
+               "subscription": {"plan": "free", "status": "active", "billing_interval": "month",
+                                "paid": False, "currency": "USD", "amount": 0,
+                                "purchased_at": None, "current_period_start": now(),
+                                "current_period_end": now() + timedelta(days=30),
+                                "next_billing_at": now() + timedelta(days=30),
+                                "cancel_at_period_end": False, "promo_code": None,
+                                "promo_redeemed_at": None, "provider": None},
+               "usage": {"workflow_runs": 0, "period_started_at": now()}}
         try:
             result = self.db.users.insert_one(doc)
         except DuplicateKeyError as exc:
@@ -145,7 +155,73 @@ class MongoStore:
 
     @staticmethod
     def public_user(doc: dict[str, Any]) -> dict[str, Any]:
-        return {"id": str(doc.get("_id", doc.get("id"))), "email": doc["email"], "name": doc.get("name", "")}
+        return {"id": str(doc.get("_id", doc.get("id"))), "email": doc["email"], "name": doc.get("name", ""),
+                "subscription": doc.get("subscription", {"plan": "free", "status": "active", "paid": False}),
+                "usage": doc.get("usage", {})}
+
+    def subscription_for_user(self, user_id: str) -> dict[str, Any]:
+        from bson import ObjectId
+        doc = self.db.users.find_one({"_id": ObjectId(user_id)}, {"subscription": 1, "usage": 1}) or {}
+        return {"subscription": doc.get("subscription", {}), "usage": doc.get("usage", {})}
+
+    def redeem_promo(self, user_id: str, code: str) -> dict[str, Any]:
+        from bson import ObjectId
+        from pymongo.errors import DuplicateKeyError
+        normalized = code.strip().lower()
+        if normalized != "ad-astra26":
+            raise ValueError("That promo code is not valid")
+        user = self.db.users.find_one({"_id": ObjectId(user_id)})
+        if not user:
+            raise ValueError("User not found")
+        existing = self.db.promo_redemptions.find_one({"user_id": ObjectId(user_id), "code": normalized})
+        if existing:
+            raise ValueError("This promo code has already been redeemed")
+        start = now()
+        end = start + timedelta(days=30)
+        subscription = {**user.get("subscription", {}), "plan": "ad-astra", "status": "active", "paid": False,
+                        "currency": "USD", "amount": 0, "billing_interval": "month", "purchased_at": start,
+                        "current_period_start": start, "current_period_end": end, "next_billing_at": end,
+                        "cancel_at_period_end": False, "promo_code": normalized, "promo_redeemed_at": start,
+                        "provider": "promo"}
+        try:
+            self.db.promo_redemptions.insert_one({"user_id": ObjectId(user_id), "code": normalized, "redeemed_at": start,
+                                                  "period_end": end})
+        except DuplicateKeyError as exc:
+            raise ValueError("This promo code has already been redeemed") from exc
+        self.db.users.update_one({"_id": ObjectId(user_id)}, {"$set": {"subscription": subscription}})
+        return subscription
+
+    def workspace_credentials(self, user_id: str, workspace_id: str) -> list[dict[str, Any]]:
+        if not self.is_member(user_id, workspace_id):
+            raise PermissionError("Workspace access denied")
+        from bson import ObjectId
+        return [{"provider": row["provider"], "label": row.get("label", row["provider"]),
+                 "last_four": row.get("last_four", ""), "created_at": row.get("created_at"),
+                 "updated_at": row.get("updated_at"), "last_tested_at": row.get("last_tested_at")}
+                for row in self.db.workspace_credentials.find({"workspace_id": ObjectId(workspace_id)})]
+
+    def save_workspace_credential(self, user_id: str, workspace_id: str, provider: str, encrypted_value: str, label: str, last_four: str) -> dict[str, Any]:
+        if not self.is_member(user_id, workspace_id):
+            raise PermissionError("Workspace access denied")
+        from bson import ObjectId
+        timestamp = now()
+        self.db.workspace_credentials.update_one(
+            {"workspace_id": ObjectId(workspace_id), "provider": provider},
+            {"$set": {"encrypted_value": encrypted_value, "label": label, "last_four": last_four,
+                      "updated_at": timestamp}, "$setOnInsert": {"created_at": timestamp}}, upsert=True)
+        return {"provider": provider, "label": label, "last_four": last_four, "updated_at": timestamp}
+
+    def get_workspace_credential(self, user_id: str, workspace_id: str, provider: str) -> dict[str, Any] | None:
+        if not self.is_member(user_id, workspace_id):
+            raise PermissionError("Workspace access denied")
+        from bson import ObjectId
+        return self.db.workspace_credentials.find_one({"workspace_id": ObjectId(workspace_id), "provider": provider})
+
+    def remove_workspace_credential(self, user_id: str, workspace_id: str, provider: str) -> None:
+        if not self.is_member(user_id, workspace_id):
+            raise PermissionError("Workspace access denied")
+        from bson import ObjectId
+        self.db.workspace_credentials.delete_one({"workspace_id": ObjectId(workspace_id), "provider": provider})
 
     def create_workspace(self, user_id: str, name: str) -> dict[str, Any]:
         from bson import ObjectId

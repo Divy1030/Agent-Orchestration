@@ -4,4 +4,5 @@ mcp>=2,<3
 python-dotenv>=1.0,<2
 pymongo>=4.10,<5
 clerk-backend-api>=4,<6
+cryptography>=43,<46
 uvicorn[standard]>=0.30,<1
