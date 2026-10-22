@@ -2649,7 +2649,7 @@
 }
 .square-button-compact { min-height: 32px; padding: 0 10px; font-size: 12px; }
 .square-button-primary { background: var(--accent, #315bb5); color: #fff; border: 1px solid transparent; }
-.square-button-quiet { background: transparent; color: var(--text, #e8edf7); border: 1px solid var(--line, #34415a); }
+.square-button-quiet { background: transparent; color: var(--ink, #172033); border: 1px solid var(--line, #dbe2ed); }
 .square-button-danger { background: transparent; color: #e58d94; border: 1px solid rgba(229, 141, 148, .5); }
 .square-button:hover:not(:disabled) { transform: translateY(-1px); }
 .square-button:focus-visible { outline: 2px solid #8aaeff; outline-offset: 2px; }
@@ -2689,7 +2689,22 @@
 .settings-subscription-card > .square-button-primary { order: 5; }
 .settings-card-actions { display: flex; gap: 10px; margin: auto 25px 20px; }
 .settings-inline-error { margin: 0 25px 14px; color: #e58d94; font-size: 12px; }
-.spaces-layout { display: grid; grid-template-columns: minmax(300px, .85fr) minmax(420px, 1.15fr); gap: 18px; align-items: start; }
+ .spaces-layout { display: grid; grid-template-columns: minmax(300px, .85fr) minmax(420px, 1.15fr); gap: 18px; align-items: start; }
+ .spaces-page-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
+ .spaces-library-card { min-height: 380px; }
+ .spaces-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 18px; min-height: 315px; }
+ .space-list-card { width: auto; min-width: 0; text-align: left; color: inherit; background: transparent; }
+ .space-list-card .workflow-card-top { display: flex; align-items: flex-start; justify-content: space-between; }
+ .space-list-card .workflow-card-status { margin-bottom: 22px; }
+ .space-list-card .workflow-card-status .connected { color: #15803d; }
+ .space-card-arrow { color: #98a3b3; transition: transform .15s ease, color .15s ease; }
+ .space-list-card:hover .space-card-arrow { color: #6250be; transform: translateX(3px); }
+ .spaces-empty-state { grid-column: 1 / -1; display: flex; align-items: center; gap: 14px; min-height: 215px; padding: 25px; border: 1px dashed #cdd7e4; color: #526176; }
+ .spaces-empty-state > div { flex: 1; }
+ .spaces-empty-state strong, .spaces-empty-state p { display: block; }
+ .spaces-empty-state strong { color: #172033; font-size: 14px; }
+ .spaces-empty-state p { margin: 5px 0 0; color: #718097; font-size: 12px; }
+ .spaces-dialog { width: min(460px, calc(100% - 30px)); }
 .space-list { border-top: 1px solid #edf0f5; padding: 8px 25px 15px; }
 .space-list-item { display: flex; width: 100%; padding: 13px 0; border: 0; border-bottom: 1px solid #edf0f5; background: transparent; color: inherit; text-align: left; }
 .space-list-item span, .space-member-row span { display: grid; gap: 4px; }
@@ -2701,7 +2716,8 @@
 .space-members { padding: 8px 25px 15px; border-top: 1px solid #edf0f5; }
 .space-member-row { display: flex; justify-content: space-between; align-items: center; padding: 13px 0; border-bottom: 1px solid #edf0f5; }
 .space-member-row:last-child, .space-list-item:last-child { border-bottom: 0; }
-@media(max-width:900px) { .spaces-layout { grid-template-columns: 1fr; } }
+ @media(max-width:900px) { .spaces-layout { grid-template-columns: 1fr; } }
+ @media(max-width:760px) { .spaces-page-actions { width: 100%; justify-content: flex-start; } .spaces-page-actions .square-button { flex: 1; } .spaces-empty-state { align-items: flex-start; flex-wrap: wrap; } .spaces-empty-state .square-button { width: 100%; } }
 .space-detail-header { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; margin-bottom: 24px; }
 .space-detail-header .library-title { margin-top: 10px; }
 .space-detail-header p { margin: 8px 0 0; color: #8a96a8; }
@@ -2724,8 +2740,6 @@
 .member-invite-panel > div { flex: 1; min-width: 0; }
 .member-invite-panel p { max-width: 720px; }
 .github-access-link { display: inline-block; margin-top: 8px; color: #b7a9ff; font-size: 11px; text-decoration: underline; }
-.invite-email-field { display: block; max-width: 420px; margin-top: 14px; color: #a9acc2; font-size: 11px; }
-.invite-email-field input { display: block; width: 100%; margin-top: 6px; border: 1px solid #3c4d6b; background: #202b40; color: #e6ebf5; padding: 9px 10px; }
 .collaborator-confirmation { display: flex; align-items: flex-start; gap: 8px; max-width: 720px; margin-top: 14px; color: #e5c98a; font-size: 11px; line-height: 1.5; }
 .collaborator-confirmation input { margin-top: 2px; accent-color: #6250be; }
 .space-stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 16px; }

@@ -621,7 +621,9 @@ class MongoStore:
             raise PermissionError("Space access denied")
         project_doc = self.db.space_projects.find_one({"workspace_id": ObjectId(workspace_id)}, {"_id": 0})
         project = self._public_space_project(project_doc)
-        return {"id": workspace_id, "name": workspace["name"], "slug": workspace["slug"], "role": membership["role"],
+        project_name = (project or {}).get("github_full_name", "").split("/")[-1] or workspace["slug"]
+        return {"id": workspace_id, "name": workspace["name"], "slug": workspace["slug"], "project_slug": project_name,
+                "role": membership["role"],
                 "owner": str(workspace["owner_id"]) == user_id, "project": project}
 
     @staticmethod
@@ -701,7 +703,12 @@ class MongoStore:
     def workspaces_for_user(self, user_id: str) -> list[dict[str, Any]]:
         from bson import ObjectId
         rows = self.db.memberships.aggregate([{"$match": {"user_id": ObjectId(user_id)}}, {"$lookup": {"from": "workspaces", "localField": "workspace_id", "foreignField": "_id", "as": "workspace"}}, {"$unwind": "$workspace"}])
-        return [{"id": str(row["workspace"]["_id"]), "name": row["workspace"]["name"], "slug": row["workspace"]["slug"], "role": row["role"]} for row in rows]
+        result = []
+        for row in rows:
+            project = self.db.space_projects.find_one({"workspace_id": row["workspace"]["_id"]}, {"github_full_name": 1}) or {}
+            project_slug = (project.get("github_full_name") or "").split("/")[-1] or row["workspace"]["slug"]
+            result.append({"id": str(row["workspace"]["_id"]), "name": row["workspace"]["name"], "slug": row["workspace"]["slug"], "project_slug": project_slug, "role": row["role"]})
+        return result
 
     def update_workspace(self, user_id: str, workspace_id: str, name: str, role: str) -> dict[str, Any]:
         from bson import ObjectId
