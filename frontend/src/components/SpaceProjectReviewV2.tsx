@@ -14,6 +14,7 @@ type Props = {
 };
 
 type DiffTarget = { task: any; file: any };
+type DiffRow = { kind: 'context' | 'added' | 'removed' | 'changed' | 'collapsed'; left?: string; right?: string; leftNo?: number; rightNo?: number; hidden?: number };
 
 function contentLines(value: string) {
   return value ? value.split('\n') : [];
@@ -30,11 +31,140 @@ function diffCounts(before: string, after: string) {
   };
 }
 
+function plannerOnlyOutput(content: string) {
+  const jsonBlock = content.match(/```json\s*([\s\S]*?)```/i);
+  if (jsonBlock) {
+    try {
+      const parsed = JSON.parse(jsonBlock[1]);
+      if (Array.isArray(parsed.files)) {
+        return [
+          `Summary: ${parsed.summary || 'Implementation plan'}`,
+          '',
+          'Files to change:',
+          ...parsed.files.map((file: any) => `- ${file.path || 'repository file'}${file.reason || file.why ? ` — ${file.reason || file.why}` : ''}`),
+          '',
+          'Dependencies:',
+          ...(Array.isArray(parsed.dependencies) ? parsed.dependencies.map((item: any) => `- ${item}`) : ['- Review the repository context and existing project conventions.']),
+          '',
+          'Acceptance criteria:',
+          ...(Array.isArray(parsed.acceptance_criteria) ? parsed.acceptance_criteria.map((item: any) => `- ${item}`) : ['- The requested behavior is implemented without unrelated changes.']),
+          '',
+          'Verification steps:',
+          ...(Array.isArray(parsed.verification) ? parsed.verification.map((item: any) => `- ${item}`) : ['- Run project checks and manually verify the requested behavior.']),
+        ].join('\n');
+      }
+    } catch {
+      // Fall through to the generic fenced-code removal below.
+    }
+  }
+  return content.replace(/```[\s\S]*?```/g, '[Code omitted: planner output is plan-only.]');
+}
+
+function buildDiffRows(before: string, after: string): DiffRow[] {
+  const oldLines = contentLines(before);
+  const newLines = contentLines(after);
+  // Keep the review panel responsive for generated files while still giving
+  // normal source files a real line-aware diff instead of two raw text panes.
+  if (oldLines.length > 1600 || newLines.length > 1600) {
+    const rows: DiffRow[] = [];
+    const count = Math.max(oldLines.length, newLines.length);
+    for (let index = 0; index < count; index += 1) {
+      const left = oldLines[index];
+      const right = newLines[index];
+      rows.push(left !== undefined && right !== undefined
+        ? { kind: left === right ? 'context' : 'changed', left, right, leftNo: index + 1, rightNo: index + 1 }
+        : left !== undefined
+          ? { kind: 'removed', left, leftNo: index + 1 }
+          : { kind: 'added', right, rightNo: index + 1 });
+    }
+    return rows;
+  }
+
+  const width = newLines.length + 1;
+  const table = Array.from({ length: oldLines.length + 1 }, () => new Uint16Array(width));
+  for (let oldIndex = oldLines.length - 1; oldIndex >= 0; oldIndex -= 1) {
+    for (let newIndex = newLines.length - 1; newIndex >= 0; newIndex -= 1) {
+      table[oldIndex][newIndex] = oldLines[oldIndex] === newLines[newIndex]
+        ? table[oldIndex + 1][newIndex + 1] + 1
+        : Math.max(table[oldIndex + 1][newIndex], table[oldIndex][newIndex + 1]);
+    }
+  }
+
+  const operations: DiffRow[] = [];
+  let oldIndex = 0;
+  let newIndex = 0;
+  while (oldIndex < oldLines.length || newIndex < newLines.length) {
+    if (oldIndex < oldLines.length && newIndex < newLines.length && oldLines[oldIndex] === newLines[newIndex]) {
+      operations.push({ kind: 'context', left: oldLines[oldIndex], right: newLines[newIndex], leftNo: oldIndex + 1, rightNo: newIndex + 1 });
+      oldIndex += 1;
+      newIndex += 1;
+    } else if (newIndex < newLines.length && (oldIndex >= oldLines.length || table[oldIndex][newIndex + 1] >= table[oldIndex + 1][newIndex])) {
+      operations.push({ kind: 'added', right: newLines[newIndex], rightNo: newIndex + 1 });
+      newIndex += 1;
+    } else {
+      operations.push({ kind: 'removed', left: oldLines[oldIndex], leftNo: oldIndex + 1 });
+      oldIndex += 1;
+    }
+  }
+
+  const rows: DiffRow[] = [];
+  for (let index = 0; index < operations.length; index += 1) {
+    const current = operations[index];
+    const next = operations[index + 1];
+    if (current.kind === 'removed' && next?.kind === 'added') {
+      rows.push({ kind: 'changed', left: current.left, leftNo: current.leftNo, right: next.right, rightNo: next.rightNo });
+      index += 1;
+    } else if (current.kind === 'added' && next?.kind === 'removed') {
+      rows.push({ kind: 'changed', left: next.left, leftNo: next.leftNo, right: current.right, rightNo: current.rightNo });
+      index += 1;
+    } else {
+      rows.push(current);
+    }
+  }
+  return rows;
+}
+
+function focusDiffRows(rows: DiffRow[], context = 3): DiffRow[] {
+  const changed = rows.reduce<number[]>((indexes, row, index) => {
+    if (row.kind === 'added' || row.kind === 'removed' || row.kind === 'changed') indexes.push(index);
+    return indexes;
+  }, []);
+  if (!changed.length) return rows;
+
+  const visible = new Set<number>();
+  changed.forEach(index => {
+    for (let cursor = Math.max(0, index - context); cursor <= Math.min(rows.length - 1, index + context); cursor += 1) visible.add(cursor);
+  });
+  const focused: DiffRow[] = [];
+  let index = 0;
+  while (index < rows.length) {
+    if (visible.has(index)) {
+      focused.push(rows[index]);
+      index += 1;
+      continue;
+    }
+    const start = index;
+    while (index < rows.length && !visible.has(index)) index += 1;
+    focused.push({ kind: 'collapsed', hidden: index - start, leftNo: rows[start]?.leftNo, rightNo: rows[start]?.rightNo });
+  }
+  return focused;
+}
+
+function DiffRows({ rows }: { rows: DiffRow[] }) {
+  return <div className="review-diff-lines">{focusDiffRows(rows).map((row, index) => row.kind === 'collapsed'
+    ? <div className="review-diff-collapsed" key={`collapsed-${index}`}>⋮ &nbsp; {row.hidden} unchanged line{row.hidden === 1 ? '' : 's'} hidden</div>
+    : <div className={`review-diff-line ${row.kind}`} key={`${row.leftNo || 'x'}-${row.rightNo || 'x'}-${index}`}>
+      <span className="review-diff-gutter">{row.leftNo || ''}</span><span className="review-diff-marker">{row.kind === 'removed' || row.kind === 'changed' ? '−' : ' '}</span><code>{row.left || ''}</code>
+      <span className="review-diff-gutter">{row.rightNo || ''}</span><span className="review-diff-marker">{row.kind === 'added' || row.kind === 'changed' ? '+' : ' '}</span><code>{row.right || ''}</code>
+    </div>)}</div>;
+}
+
 export default function SpaceProjectReview({ spaceId, tasks, agents, baseBranch, canCommit, onChanged }: Props) {
   const [baseContents, setBaseContents] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState('');
   const [message, setMessage] = useState('');
   const [activeDiff, setActiveDiff] = useState<DiffTarget | null>(null);
+  const [acceptedPlans, setAcceptedPlans] = useState<Record<string, boolean>>({});
   const reviewTasks = useMemo(
     () => tasks.filter(task => task.execution?.review_status !== 'closed' && (task.execution?.proposed_changes?.files?.length || task.status === 'review' || (task.status === 'done' && (task.execution?.result?.role === 'coder' || task.execution?.result?.role === 'fix' || task.task_type === 'code' || task.task_type === 'fix')))),
     [tasks],
@@ -104,8 +234,8 @@ export default function SpaceProjectReview({ spaceId, tasks, agents, baseBranch,
     <div className="project-review-actions">
       {role === 'planner' || role === 'thinker' ? (
         <>
-          <SquareButton disabled={!!busy} onClick={() => void action(task, 'accept-plan', () => api(`/api/spaces/${spaceId}/tasks/${task.id}/advance`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'auto' }) }))}>
-            Accept plan
+          <SquareButton className={acceptedPlans[task.id] ? 'review-plan-accepted' : ''} disabled={!!busy || !!acceptedPlans[task.id]} onClick={() => void action(task, 'accept-plan', async () => { await api(`/api/spaces/${spaceId}/tasks/${task.id}/advance`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'auto' }) }); setAcceptedPlans(current => ({ ...current, [task.id]: true })); })}>
+            {acceptedPlans[task.id] ? '✓ Plan accepted · next agent started' : 'Accept plan'}
           </SquareButton>
           <SquareButton tone="danger" disabled={!!busy} onClick={() => void action(task, 'reject-plan', () => api(`/api/spaces/${spaceId}/tasks/${task.id}/reject-proposal`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason: 'Plan needs revision.' }) }))}>
             Reject plan
@@ -153,7 +283,7 @@ export default function SpaceProjectReview({ spaceId, tasks, agents, baseBranch,
         const role = execution.result?.role || agent?.role || task.task_type;
         const proposal = execution.proposed_changes || {};
         const files = role === 'coder' || role === 'fix' ? (proposal.files || []) : [];
-        const planOutput = execution.result?.reply || '';
+        const planOutput = role === 'planner' || role === 'thinker' ? plannerOnlyOutput(execution.result?.reply || '') : execution.result?.reply || '';
         return (
           <article className="project-review-card" key={task.id}>
             <header className="project-review-card-heading"><div><h3>{task.title}</h3><p>{task.task_type || 'code'} · {task.status.replace('_', ' ')} · {proposal.status || 'pending review'}</p></div><span className={`review-status review-status-${task.status}`}>{task.status.replace('_', ' ')}</span></header>
@@ -161,7 +291,7 @@ export default function SpaceProjectReview({ spaceId, tasks, agents, baseBranch,
             <section className="project-review-criteria"><strong>Acceptance criteria</strong><p>{task.description || 'No acceptance criteria were provided.'}</p></section>
             {(role === 'planner' || role === 'thinker') && planOutput && <section className="project-review-plan"><div className="project-review-plan-heading"><strong>Planner output</strong><span>Plan only · no code changes</span></div><TaskOutputMarkdown content={planOutput} /></section>}
             {(role === 'coder' || role === 'fix') && !files.length && planOutput && <section className="project-review-plan project-review-coder-output"><div className="project-review-plan-heading"><strong>Coder output</strong><span>No structured file proposal was saved</span></div><TaskOutputMarkdown content={planOutput} /><p className="project-review-warning">This task cannot be committed or submitted as a pull request until the coder returns complete file changes.</p></section>}
-            {files.length > 0 && <section className="project-review-diff"><div className="project-review-diff-heading"><strong>Side-by-side diff</strong><span>{files.length} file{files.length === 1 ? '' : 's'} · click to expand</span></div>{files.map((file: any) => { const before = file.before || file.previous_content || baseContents[file.path] || ''; return <div className="project-review-file" key={file.path}><button type="button" className="project-review-file-name review-diff-file-button" onClick={() => setActiveDiff({ task, file })}><GitCommit size={14} />{file.path}</button><div className="project-review-columns"><pre className="project-review-before">{before || 'No previous content supplied'}</pre><pre className="project-review-after">{file.content || file.after || ''}</pre></div></div>; })}</section>}
+            {files.length > 0 && <section className="project-review-diff"><div className="project-review-diff-heading"><strong>Side-by-side diff</strong><span>{files.length} file{files.length === 1 ? '' : 's'} · click to expand</span></div>{files.map((file: any) => { const before = file.before || file.previous_content || baseContents[file.path] || ''; return <div className="project-review-file" key={file.path}><button type="button" className="project-review-file-name review-diff-file-button" onClick={() => setActiveDiff({ task, file })}><GitCommit size={14} />{file.path}</button><DiffRows rows={buildDiffRows(before, file.content || file.after || '')} /></div>; })}</section>}
             {tests.length > 0 && <section className="project-review-tests"><strong>Test results</strong>{(Array.isArray(tests) ? tests : [tests]).map((test: any, index: number) => <div key={index} className={test.passed === false || test.status === 'failed' ? 'test-failed' : 'test-passed'}>{typeof test === 'string' ? test : `${test.name || test.command || 'Test'} · ${test.status || (test.passed === false ? 'failed' : 'passed')}`}</div>)}</section>}
             {renderActions(task, files, execution, role)}
           </article>
@@ -171,7 +301,7 @@ export default function SpaceProjectReview({ spaceId, tasks, agents, baseBranch,
         const before = activeDiff.file.before || activeDiff.file.previous_content || baseContents[activeDiff.file.path] || '';
         const after = activeDiff.file.content || activeDiff.file.after || '';
         const counts = diffCounts(before, after);
-        return <div className="review-diff-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setActiveDiff(null); }}><section className="review-diff-dialog" role="dialog" aria-modal="true" aria-label={`Diff for ${activeDiff.file.path}`}><header className="review-diff-dialog-header"><div><span className="eyebrow">FILE CHANGE</span><strong>{activeDiff.file.path}</strong><small>{activeDiff.task.title} · base {baseBranch}</small></div><div className="review-diff-dialog-header-actions"><span className="review-diff-count added">+{counts.added}</span><span className="review-diff-count removed">-{counts.removed}</span><button type="button" aria-label="Close diff" onClick={() => setActiveDiff(null)}><X size={18} /></button></div></header><div className="review-diff-dialog-labels"><span>Base branch · {baseBranch}</span><span>Agent proposal</span></div><div className="review-diff-dialog-body"><pre className="review-diff-dialog-before">{before || 'No previous content supplied'}</pre><pre className="review-diff-dialog-after">{after || 'No proposed content supplied'}</pre></div>{renderActions(activeDiff.task, activeDiff.task.execution?.proposed_changes?.files || [], activeDiff.task.execution || 'coder')}</section></div>;
+        return <div className="review-diff-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setActiveDiff(null); }}><section className="review-diff-dialog" role="dialog" aria-modal="true" aria-label={`Diff for ${activeDiff.file.path}`}><header className="review-diff-dialog-header"><div><span className="eyebrow">FILE CHANGE</span><strong>{activeDiff.file.path}</strong><small>{activeDiff.task.title} · base {baseBranch}</small></div><div className="review-diff-dialog-header-actions"><span className="review-diff-count added">+{counts.added}</span><span className="review-diff-count removed">-{counts.removed}</span><button type="button" aria-label="Close diff" onClick={() => setActiveDiff(null)}><X size={18} /></button></div></header><div className="review-diff-dialog-labels"><span>Base branch · {baseBranch}</span><span>Agent proposal</span></div><div className="review-diff-dialog-body"><DiffRows rows={buildDiffRows(before, after)} /></div>{renderActions(activeDiff.task, activeDiff.task.execution?.proposed_changes?.files || [], activeDiff.task.execution || 'coder')}</section></div>;
       })()}
     </section>
   );

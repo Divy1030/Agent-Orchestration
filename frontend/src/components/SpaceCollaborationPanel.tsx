@@ -1,32 +1,25 @@
 import { useEffect, useState } from 'react';
 import { Plus, Trash } from '@phosphor-icons/react';
 import { api } from '../lib/api';
+import { useSpaceProjectStore } from '../lib/spaceProjectStore';
 import SquareButton from './SquareButton';
 
 type Props = { spaceId: string; canManage: boolean };
 
 export default function SpaceCollaborationPanel({ spaceId, canManage }: Props) {
-  const [memory, setMemory] = useState<any[]>([]), [skills, setSkills] = useState<any[]>([]), [tasks, setTasks] = useState<any[]>([]), [approvals, setApprovals] = useState<any[]>([]), [agents, setAgents] = useState<any[]>([]);
+  const [memory, setMemory] = useState<any[]>([]), [skills, setSkills] = useState<any[]>([]), [approvals, setApprovals] = useState<any[]>([]);
+  const { tasks, agents, refresh: refreshProject } = useSpaceProjectStore(spaceId);
   const [memoryText, setMemoryText] = useState(''), [skillName, setSkillName] = useState(''), [skillRules, setSkillRules] = useState(''), [taskTitle, setTaskTitle] = useState(''), [taskDescription, setTaskDescription] = useState(''), [taskDialogOpen, setTaskDialogOpen] = useState(false), [approvalTitle, setApprovalTitle] = useState(''), [message, setMessage] = useState(''), [busy, setBusy] = useState(false), [proposalSelection, setProposalSelection] = useState<Record<string, string[]>>({}), [pipelineAgent, setPipelineAgent] = useState<Record<string, string>>({}), [editingTaskId, setEditingTaskId] = useState<string | null>(null), [editTitle, setEditTitle] = useState(''), [editDescription, setEditDescription] = useState(''), [editType, setEditType] = useState('code'), [editPriority, setEditPriority] = useState('normal'), [editAgent, setEditAgent] = useState('');
   const load = async () => {
-    const [memoryResult, skillsResult, tasksResult, approvalResult, agentsResult, projectResult] = await Promise.all([
+    const [memoryResult, skillsResult, approvalResult] = await Promise.all([
       api<{ memory: any[] }>(`/api/spaces/${spaceId}/memory`), api<{ skills: any[] }>(`/api/spaces/${spaceId}/skills`),
-      api<{ tasks: any[] }>(`/api/spaces/${spaceId}/tasks`), api<{ approvals: any[] }>(`/api/spaces/${spaceId}/approvals`), api<{ agents: any[] }>(`/api/spaces/${spaceId}/agents`), api<{ project: { agents: any[] } }>(`/api/spaces/${spaceId}/project`),
+      api<{ approvals: any[] }>(`/api/spaces/${spaceId}/approvals`),
     ]);
-    setMemory(memoryResult.memory); setSkills(skillsResult.skills); setTasks(tasksResult.tasks); const assignedAgents = agentsResult.agents.length ? agentsResult.agents : projectResult.project.agents; setApprovals(approvalResult.approvals); setAgents(assignedAgents);
-  };
-  const refreshTasks = async () => {
-    const result = await api<{ tasks: any[] }>(`/api/spaces/${spaceId}/tasks`);
-    setTasks(result.tasks);
+    setMemory(memoryResult.memory); setSkills(skillsResult.skills); setApprovals(approvalResult.approvals);
   };
   useEffect(() => { void load().catch((error: any) => setMessage(error.message)); }, [spaceId]);
   const hasRunningTask = tasks.some(task => task.execution?.status === 'running');
-  useEffect(() => {
-    if (!hasRunningTask) return undefined;
-    const timer = window.setInterval(() => { if (document.visibilityState === 'visible') void refreshTasks().catch((error: any) => setMessage(error.message)); }, 5000);
-    return () => window.clearInterval(timer);
-  }, [spaceId, hasRunningTask]);
-  const run = async (action: () => Promise<void>) => { setBusy(true); setMessage(''); try { await action(); await load(); } catch (error: any) { setMessage(error.message); } finally { setBusy(false); } };
+  const run = async (action: () => Promise<void>) => { setBusy(true); setMessage(''); try { await action(); await Promise.all([load(), refreshProject()]); } catch (error: any) { setMessage(error.message); } finally { setBusy(false); } };
   const startTask = (taskId: string) => void run(async () => { await api(`/api/spaces/${spaceId}/tasks/${taskId}/start`, { method: 'POST' }); });
   const prepareBranch = (taskId: string) => void run(async () => { await api(`/api/spaces/${spaceId}/tasks/${taskId}/branch`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) }); });
   const openPullRequest = (task: any) => void run(async () => { const result = await api<{ pull_request: { url: string } }>(`/api/spaces/${spaceId}/tasks/${task.id}/pull-request`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: task.title, body: task.description || 'Agent task handoff for review.' }) }); setMessage(`Pull request created: ${result.pull_request.url}`); });

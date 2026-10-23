@@ -178,7 +178,7 @@ Task title: {task.get('title', '')}
 Task description: {task.get('description', '') or 'No additional description was provided.'}
 Priority: {task.get('priority', 'normal')}
 
-Use the shared project memory, skills, patterns, open tasks, repository snapshot, and predecessor artifacts below as context. The repository snapshot is pinned to one commit SHA; do not assume files changed outside it. Do not claim that code was changed, committed, or pushed. For planning tasks, produce only a structured plan: summary, files to change, reason for each file, dependencies, acceptance criteria, risks, and verification steps. Do not output code, fenced JSON file proposals, or complete file contents. For coder or fix tasks, return one complete file edit per changed file using this exact format: `FILE: safe/relative/path.ext` followed by a fenced code block containing the complete UTF-8 replacement file content. Do not return a prose plan instead. You may use the equivalent fenced JSON shape: {{"summary":"...","files":[{{"path":"safe/relative/path","content":"complete UTF-8 file content"}}],"verification":["..."]}}. For tester tasks, do not propose code; report verification and end with exactly one line `TEST_STATUS: PASS` or `TEST_STATUS: FAIL`. For reviewer tasks, report findings and a recommendation only. Only include complete files for coder/fix tasks; never include secrets, credentials, binary data, or paths outside the repository.
+Use the shared project memory, skills, patterns, open tasks, repository snapshot, and predecessor artifacts below as context. The repository snapshot is pinned to one commit SHA; do not assume files changed outside it. Do not claim that code was changed, committed, or pushed. For planning tasks, produce only a detailed plan with these exact sections: Summary, Files to change (each path with a reason), Dependencies, Acceptance criteria, Risks, and Verification steps. Include concrete reasoning based on the supplied repository context. Never include source code, fenced code blocks, a `content` field, or complete file contents in a plan. For coder or fix tasks, return one complete file edit per changed file using this exact format: `FILE: safe/relative/path.ext` followed by a fenced code block containing the complete UTF-8 replacement file content. Do not return a prose plan instead. You may use the equivalent fenced JSON shape: {{"summary":"...","files":[{{"path":"safe/relative/path","content":"complete UTF-8 file content"}}],"verification":["..."]}}. For tester tasks, do not propose code; report verification and end with exactly one line `TEST_STATUS: PASS` or `TEST_STATUS: FAIL`. For reviewer tasks, report findings and a recommendation only. Only include complete files for coder/fix tasks; never include secrets, credentials, binary data, or paths outside the repository.
 
 Shared context:
 {shared_context}
@@ -192,7 +192,7 @@ Artifacts produced by predecessor tasks:
 FINAL ROLE INSTRUCTION — this task is assigned to the {role.upper()} role.
 If your role is CODER or FIX, do not write another plan and do not describe what a planner should do. Inspect the supplied repository context and return the actual implementation proposal as one complete fenced `json` object with `summary`, `files`, and `verification`. Every item in `files` must contain the complete replacement content for a real repository-relative file. If you cannot safely provide complete file contents, state the blocker clearly instead of returning a plan.
 If your role is TESTER, do not write code or a plan; report verification and finish with `TEST_STATUS: PASS` or `TEST_STATUS: FAIL`.
-If your role is PLANNER or THINKER, return a plan only and never include file contents.
+If your role is PLANNER or THINKER, return a detailed plan only with all six required sections and never include file contents.
 """
         mongo.update_space_task_phase(space_id, task_id, "calling_model")
         mongo.record_space_task_event(space_id, task_id, "context_ready", "Repository context and predecessor artifacts loaded")
@@ -202,6 +202,11 @@ If your role is PLANNER or THINKER, return a plan only and never include file co
                                                  "max_tokens": 12000, "temperature": 0.1}},
                                      [{"role": "user", "content": prompt}])
         reply = result.get("reply", "")
+        if role in {"planner", "thinker"}:
+            # A model can still ignore the role instruction and return a file
+            # proposal. Keep that output plan-only at the persistence boundary;
+            # only coder/fix responses may enter the implementation pipeline.
+            reply = sanitize_planner_reply(reply)
         mongo.update_space_task_phase(space_id, task_id, "saving_result")
         # Only implementation roles can create file proposals. Planning,
         # testing, and review responses remain human-reviewable artifacts.
@@ -352,7 +357,10 @@ def extract_agent_proposal(reply: str) -> dict[str, Any] | None:
         total_bytes += len(content.encode("utf-8"))
         if len(content.encode("utf-8")) > 250_000 or total_bytes > 1_000_000:
             return None
-        clean_files.append({"path": path, "content": content})
+        clean_item = {"path": path, "content": content}
+        if isinstance(item, dict) and isinstance(item.get("reason") or item.get("why"), str):
+            clean_item["reason"] = str(item.get("reason") or item.get("why"))[:1000]
+        clean_files.append(clean_item)
     return {"summary": str(payload.get("summary", ""))[:2000], "files": clean_files, "status": "pending",
             "verification": [str(item)[:500] for item in payload.get("verification", [])[:20]] if isinstance(payload.get("verification", []), list) else []}
 
@@ -385,6 +393,29 @@ def extract_agent_file_blocks(reply: str) -> dict[str, Any] | None:
     if not clean_files or len(clean_files) > 20:
         return None
     return {"summary": "Normalized coder file edits", "files": clean_files, "status": "pending", "verification": []}
+
+
+def sanitize_planner_reply(reply: str) -> str:
+    """Remove implementation content from planner output before it is stored."""
+    import re
+
+    structured = extract_agent_proposal(reply)
+    if structured:
+        lines = [f"Summary: {structured.get('summary') or 'Implementation plan'}", "", "Files to change:"]
+        for item in structured["files"]:
+            reason = item.get("reason") or item.get("why") or "Reason not supplied by the planner."
+            lines.append(f"- `{item['path']}` — {reason}")
+        lines.extend(["", "Dependencies:", "- Review the repository context and existing project conventions before implementation.", "", "Acceptance criteria:", "- The requested behavior is implemented without changing unrelated functionality.", "", "Risks:", "- Existing styles, state, or routes may need compatibility verification."])
+        verification = structured.get("verification") or []
+        if verification:
+            lines.extend(["", "Verification:", *[f"- {item}" for item in verification]])
+        else:
+            lines.extend(["", "Verification steps:", "- Run the project checks and manually verify the requested behavior."])
+        return "\n".join(lines)
+
+    # Preserve prose, but remove fenced source blocks from non-JSON answers.
+    cleaned = re.sub(r"```[\s\S]*?```", "[Code omitted: planner output is plan-only.]", reply or "", flags=re.IGNORECASE)
+    return cleaned.strip()
 
 
 def _tool_matches_message(tool: dict[str, Any], message: str) -> bool:
@@ -824,10 +855,15 @@ def get_space_task_artifacts(space_id: str, task_id: str, http_request: Request)
 
 
 @app.post("/api/spaces/{space_id}/tasks/{task_id}/advance", status_code=202)
-def advance_space_task(space_id: str, task_id: str, request: SpaceTaskAdvanceRequest, http_request: Request) -> dict[str, Any]:
+def advance_space_task(space_id: str, task_id: str, request: SpaceTaskAdvanceRequest, background_tasks: BackgroundTasks, http_request: Request) -> dict[str, Any]:
     user = current_user(http_request)
     try:
-        return {"task": mongo.advance_space_task(user["id"], space_id, task_id, request.mode, request.agent_id, request.role)}
+        next_task = mongo.advance_space_task(user["id"], space_id, task_id, request.mode, request.agent_id, request.role)
+        if request.mode == "auto":
+            claimed = mongo.claim_space_task(user["id"], space_id, next_task["id"])
+            background_tasks.add_task(run_space_task, space_id, next_task["id"], user["id"])
+            next_task = claimed
+        return {"task": next_task, "started": request.mode == "auto"}
     except PermissionError as exc:
         raise HTTPException(403, str(exc)) from exc
     except ValueError as exc:
