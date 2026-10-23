@@ -39,10 +39,10 @@ function startPolling(spaceId: string) {
   const poll = () => {
     if (document.visibilityState === 'visible') void refresh(spaceId);
     const running = store.snapshot.tasks.some(task => task.status === 'in_progress' || task.execution?.status === 'running' || task.execution?.phase === 'calling_model');
-    store.timer = window.setTimeout(poll, running ? 2500 : 8000);
+    store.timer = window.setTimeout(poll, running ? 7000 : 10000);
   };
   void refresh(spaceId);
-  store.timer = window.setTimeout(poll, 2500);
+  store.timer = window.setTimeout(poll, 7000);
 }
 
 function stopPolling(spaceId: string) {
