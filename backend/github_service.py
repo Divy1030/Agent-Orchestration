@@ -222,14 +222,23 @@ def read_file(repository_url: str, token: str, path: str, branch: str | None = N
     return {"path": clean_path, "content": content, "sha": data.get("sha"), "branch": branch}
 
 
-def create_branch(repository_url: str, token: str, branch: str, from_branch: str) -> dict:
+def create_branch(repository_url: str, token: str, branch: str, from_branch: str, reuse_existing: bool = False) -> dict:
     branch = _branch_name(branch)
     from_branch = _branch_name(from_branch, "Source branch name")
     owner, repository = _repository_parts(repository_url)
     source = _github_request(token, "GET", f"/repos/{owner}/{repository}/git/ref/heads/{from_branch}")
     sha = source.get("object", {}).get("sha")
-    created = _github_request(token, "POST", f"/repos/{owner}/{repository}/git/refs", json={"ref": f"refs/heads/{branch}", "sha": sha})
-    return {"branch": branch, "sha": created.get("object", {}).get("sha")}
+    try:
+        created = _github_request(token, "POST", f"/repos/{owner}/{repository}/git/refs", json={"ref": f"refs/heads/{branch}", "sha": sha})
+        return {"branch": branch, "sha": created.get("object", {}).get("sha")}
+    except GitHubAuthorizationError as exc:
+        # Task branches are deterministic (`agent/task-<id>`) so a retry can
+        # safely resume the same branch after a worker timeout or page reload.
+        # Manual branch creation remains strict unless the caller opts in.
+        if not reuse_existing or str(exc) != "Reference already exists":
+            raise
+        existing = _github_request(token, "GET", f"/repos/{owner}/{repository}/git/ref/heads/{branch}")
+        return {"branch": branch, "sha": existing.get("object", {}).get("sha"), "reused": True}
 
 
 def ensure_branch_is_current(repository_url: str, token: str, branch: str, base_branch: str) -> None:

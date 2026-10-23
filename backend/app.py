@@ -153,7 +153,7 @@ async def run_space_task(space_id: str, task_id: str, user_id: str) -> None:
             token, project = mongo.github_token_for_space(user_id, space_id)
             if not branch:
                 branch = f"agent/task-{task_id[:8]}"
-                branch_result = create_branch(project["repository_url"], token, branch, project.get("default_branch") or "main")
+                branch_result = create_branch(project["repository_url"], token, branch, project.get("default_branch") or "main", reuse_existing=True)
                 mongo.set_space_task_branch(space_id, task_id, branch_result["branch"], branch_result.get("sha"))
         except (GitHubAuthorizationError, PermissionError, ValueError):
             if role in {"coder", "tester", "reviewer", "security"}:
