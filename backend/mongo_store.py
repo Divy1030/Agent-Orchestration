@@ -27,6 +27,8 @@ DEFAULT_GIT_SETTINGS = {
     "pull_before_commit": True,
     "require_branch_for_non_owners": True,
     "require_pull_request_for_non_owners": True,
+    "require_approval": True,
+    "auto_proceed": True,
 }
 
 
@@ -684,6 +686,20 @@ class MongoStore:
             {"$set": {"execution.phase": phase[:60], "execution.heartbeat_at": now(), "updated_at": now()}},
         )
 
+    def record_space_task_event(self, workspace_id: str, task_id: str, event_type: str, message: str,
+                                current_file: str | None = None, files: list[str] | None = None,
+                                tests: list[dict[str, Any]] | None = None) -> None:
+        from bson import ObjectId
+        event = {"type": event_type[:40], "message": message[:500], "created_at": now()}
+        update: dict[str, Any] = {"$push": {"execution.events": {"$each": [event], "$slice": -50}}, "$set": {"execution.heartbeat_at": now(), "updated_at": now()}}
+        if current_file is not None:
+            update["$set"]["execution.current_file"] = current_file[:500]
+        if files is not None:
+            update["$set"]["execution.files_changed"] = files[:50]
+        if tests is not None:
+            update["$set"]["execution.tests"] = tests[:30]
+        self.db.space_tasks.update_one({"_id": ObjectId(task_id), "workspace_id": ObjectId(workspace_id), "status": "in_progress"}, update)
+
     def reset_running_space_tasks(self, user_id: str, workspace_id: str) -> int:
         membership = self._space_membership(user_id, workspace_id)
         if not self._space_manager(membership):
@@ -707,7 +723,7 @@ class MongoStore:
         timestamp = now()
         self.db.space_tasks.update_one({"_id": ObjectId(task_id), "workspace_id": ObjectId(workspace_id), "status": "in_progress"},
                                        {"$set": {"status": "review", "updated_at": timestamp,
-                                                  "execution": {"status": "completed", "finished_at": timestamp, "result": result}}})
+                                                  "execution.status": "completed", "execution.finished_at": timestamp, "execution.result": result}})
         row = self.db.space_tasks.find_one({"_id": ObjectId(task_id), "workspace_id": ObjectId(workspace_id)})
         self.record_space_activity(workspace_id, "task_ready_for_review", f"Agent finished task: {row.get('title', '')}", str(row.get("assignee_agent_id")))
         if row and row.get("assignee_agent_id"):
@@ -719,7 +735,7 @@ class MongoStore:
         timestamp = now()
         self.db.space_tasks.update_one({"_id": ObjectId(task_id), "workspace_id": ObjectId(workspace_id), "status": "in_progress"},
                                        {"$set": {"status": "todo", "updated_at": timestamp,
-                                                  "execution": {"status": "failed", "finished_at": timestamp, "error": error[:1000]}}})
+                                                  "execution.status": "failed", "execution.finished_at": timestamp, "execution.error": error[:1000]}})
         row = self.db.space_tasks.find_one({"_id": ObjectId(task_id), "workspace_id": ObjectId(workspace_id)})
         self.record_space_activity(workspace_id, "task_failed", f"Agent task failed: {row.get('title', '')}", str(row.get("assignee_agent_id")))
         if row and row.get("assignee_agent_id"):
@@ -767,6 +783,46 @@ class MongoStore:
         rows = self.db.space_task_artifacts.find({"workspace_id": ObjectId(workspace_id), "task_id": {"$in": dependency_ids}}).sort("created_at", 1)
         return [{"artifact_type": row.get("artifact_type", ""), "content": row.get("content", "")[:120_000],
                  "metadata": self._public_value(row.get("metadata", {}))} for row in rows]
+
+    def advance_space_task(self, user_id: str, workspace_id: str, task_id: str, mode: str,
+                           agent_id: str | None = None, role: str | None = None, system: bool = False) -> dict[str, Any]:
+        """Create the next dependent pipeline task after an artifact-producing task."""
+        membership = self._space_membership(user_id, workspace_id)
+        if not system and not self._space_manager(membership):
+            raise PermissionError("Only Space owners and admins can advance the agent pipeline")
+        from bson import ObjectId
+        task_object_id = ObjectId(task_id)
+        task = self.db.space_tasks.find_one({"_id": task_object_id, "workspace_id": ObjectId(workspace_id)})
+        if not task:
+            raise ValueError("Task not found")
+        if task.get("status") not in {"review", "done"}:
+            raise ValueError("Complete the current task before advancing the pipeline")
+        current_assignment = self.db.space_agents.find_one({"workspace_id": ObjectId(workspace_id), "agent_id": task.get("assignee_agent_id")})
+        current_role = (current_assignment or {}).get("role") or {"plan": "planner", "code": "coder", "fix": "coder", "test": "tester", "review": "reviewer", "security": "security"}.get(task.get("task_type"), "coder")
+        next_role = role or {"planner": "coder", "coder": "tester", "tester": "reviewer", "reviewer": "security", "security": None}.get(current_role)
+        if not next_role:
+            raise ValueError("No automatic next role is defined for this task")
+        assignment = None
+        if agent_id:
+            assignment = self.db.space_agents.find_one({"workspace_id": ObjectId(workspace_id), "agent_id": ObjectId(agent_id)})
+            if not assignment:
+                raise ValueError("The selected agent is not assigned to this Space")
+        else:
+            assignment = self.db.space_agents.find_one({"workspace_id": ObjectId(workspace_id), "role": next_role})
+        if not assignment:
+            raise ValueError(f"No available {next_role} agent is assigned to this Space")
+        task_type = {"planner": "plan", "coder": "code", "tester": "test", "reviewer": "review", "security": "security"}[next_role]
+        timestamp = now()
+        next_task = {"workspace_id": ObjectId(workspace_id), "title": f"{task.get('title', 'Task')} · {next_role.title()}",
+                     "description": f"Continue the pipeline from '{task.get('title', '')}'. Use the predecessor task artifacts, repository branch, acceptance criteria, and verification results.",
+                     "status": "todo", "priority": task.get("priority", "normal"), "task_type": task_type,
+                     "depends_on": [task_object_id], "assignee_agent_id": assignment["agent_id"], "created_by": ObjectId(user_id),
+                     "pipeline": {"mode": mode, "parent_task_id": task_object_id, "role": next_role}, "created_at": timestamp, "updated_at": timestamp}
+        result = self.db.space_tasks.insert_one(next_task)
+        next_task["_id"] = result.inserted_id
+        self.db.space_tasks.update_one({"_id": task_object_id}, {"$set": {"status": "done", "execution.handoff": {"mode": mode, "next_task_id": result.inserted_id}, "updated_at": timestamp}})
+        self.record_space_activity(workspace_id, "task_pipeline_advanced", f"Pipeline advanced: {next_task['title']}", str(assignment["agent_id"]))
+        return self._public_task(next_task)
 
     def set_space_task_branch(self, workspace_id: str, task_id: str, branch: str, sha: str | None = None) -> dict[str, Any]:
         from bson import ObjectId

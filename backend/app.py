@@ -22,7 +22,7 @@ from backend.auth_models import (FlowSaveRequest, GitHubBranchRequest, GitHubCom
                                   SpaceContextRequest,
                                   SpaceMemoryRequest, SpaceSkillRequest, SpaceTaskRequest, SpaceTaskStatusRequest,
                                   SpaceTaskBranchRequest, SpaceTaskPullRequestRequest, SpaceTaskApplyProposalRequest, SpaceApprovalRequest,
-                                  SpaceTaskRejectProposalRequest, SpaceTaskBatchRequest, SpaceTaskUpdateRequest,
+                                  SpaceTaskRejectProposalRequest, SpaceTaskBatchRequest, SpaceTaskAdvanceRequest, SpaceTaskUpdateRequest,
                                   SpaceAgentRequest, SpaceAgentRoleRequest, SpaceJoinCodeRequest, SpaceJoinRequest, SpaceMemberRoleRequest,
                                   SpaceProjectRequest, SpaceProjectSettingsRequest, WorkspaceRequest)
 from backend.mongo_store import MongoRuntimeStore, MongoStore, now as mongo_store_now, verify_password
@@ -148,9 +148,20 @@ async def run_space_task(space_id: str, task_id: str, user_id: str) -> None:
             raise ValueError("The task has no assigned agent")
         assignment = mongo.db.space_agents.find_one({"workspace_id": ObjectId(space_id), "agent_id": task["assignee_agent_id"]})
         role = (assignment or {}).get("role", "coder")
+        branch = (task.get("execution") or {}).get("branch")
+        try:
+            token, project = mongo.github_token_for_space(user_id, space_id)
+            if not branch:
+                branch = f"agent/task-{task_id[:8]}"
+                branch_result = create_branch(project["repository_url"], token, branch, project.get("default_branch") or "main")
+                mongo.set_space_task_branch(space_id, task_id, branch_result["branch"], branch_result.get("sha"))
+        except (GitHubAuthorizationError, PermissionError, ValueError):
+            if role in {"coder", "tester", "reviewer", "security"}:
+                raise
+        mongo.record_space_task_event(space_id, task_id, "started", f"{role.title()} agent started", branch)
         mongo.update_space_task_phase(space_id, task_id, "reading_repository")
         shared_context = mongo.shared_agent_context(space_id)
-        repository_context = await build_task_repository_context(user_id, space_id, task)
+        repository_context = await build_task_repository_context(user_id, space_id, task, branch)
         dependency_artifacts = mongo.dependency_artifacts(space_id, task)
         artifact_context = "\n\n".join(f"[{item.get('artifact_type', 'artifact')}]\n{item.get('content', '')[:60000]}" for item in dependency_artifacts) or "No predecessor artifacts are available."
         prompt = f"""You are the assigned {role} agent for a collaborative software project.
@@ -171,6 +182,7 @@ Artifacts produced by predecessor tasks:
 {artifact_context}
 """
         mongo.update_space_task_phase(space_id, task_id, "calling_model")
+        mongo.record_space_task_event(space_id, task_id, "context_ready", "Repository context and predecessor artifacts loaded")
         result = await execute_agent({"type": "agent", "workspace_id": space_id,
                                       "config": {"agent_id": str(task["assignee_agent_id"]),
                                                  "workspace_id": space_id, "project_role": role,
@@ -179,6 +191,8 @@ Artifacts produced by predecessor tasks:
         reply = result.get("reply", "")
         mongo.update_space_task_phase(space_id, task_id, "saving_result")
         proposal = extract_agent_proposal(reply)
+        proposed_files = [item.get("path") for item in (proposal or {}).get("files", []) if item.get("path")]
+        mongo.record_space_task_event(space_id, task_id, "proposal_ready", f"Agent produced {len(proposed_files)} proposed file change(s)", files=proposed_files)
         output_status = "complete" if proposal or role in {"planner", "tester", "reviewer"} else "unstructured"
         mongo.finish_space_task(space_id, task_id, {"reply": reply, "provider": result.get("provider"),
                                                      "model": result.get("model"), "role": role,
@@ -187,19 +201,41 @@ Artifacts produced by predecessor tasks:
             from bson import ObjectId
             mongo.db.space_tasks.update_one({"_id": ObjectId(task_id), "workspace_id": ObjectId(space_id)},
                                             {"$set": {"execution.proposed_changes": proposal}})
+            if role in {"coder", "fix"} and branch:
+                token, project = mongo.github_token_for_space(user_id, space_id)
+                mongo.record_space_task_event(space_id, task_id, "writing_branch", "Writing proposed changes to isolated task branch", files=proposed_files)
+                commit = commit_files(project["repository_url"], token, branch, f"Agent changes: {task.get('title', 'task')}", proposal["files"])
+                mongo.set_space_task_commit(space_id, task_id, commit)
+                mongo.record_space_task_event(space_id, task_id, "branch_updated", "Isolated task branch updated", files=proposed_files)
+        tests = []
+        if role == "tester":
+            tests = [{"name": "Agent verification", "status": "reported", "details": reply[:1000]}]
+            mongo.record_space_task_event(space_id, task_id, "tests_reported", "Tester reported verification results", tests=tests)
         artifact_type = "plan" if role == "planner" or task.get("task_type") == "plan" else ("test" if role == "tester" or task.get("task_type") == "test" else ("review" if role == "reviewer" or task.get("task_type") == "review" else "implementation"))
         mongo.add_space_task_artifact(space_id, task_id, artifact_type, reply,
                                       {"role": role, "branch": repository_context.get("branch"), "branch_sha": repository_context.get("branch_sha"),
                                        "files_read": repository_context.get("files_read", [])}, user_id)
+        project_settings = mongo.space_project_settings(user_id, space_id) if mongo.space_detail(user_id, space_id).get("role") == "owner" else None
+        if project_settings is None:
+            from bson import ObjectId
+            project = mongo.db.space_projects.find_one({"workspace_id": ObjectId(space_id)}, {"git_settings": 1}) or {}
+            project_settings = {"auto_proceed": (project.get("git_settings") or {}).get("auto_proceed", True)}
+        if project_settings.get("auto_proceed", True):
+            try:
+                next_task = mongo.advance_space_task(user_id, space_id, task_id, "auto", system=True)
+                mongo.claim_space_task(user_id, space_id, next_task["id"])
+                await run_space_task(space_id, next_task["id"], user_id)
+            except ValueError:
+                pass
     except Exception as exc:
         mongo.fail_space_task(space_id, task_id, f"{type(exc).__name__}: {exc}")
 
 
-async def build_task_repository_context(user_id: str, space_id: str, task: dict[str, Any]) -> dict[str, Any]:
+async def build_task_repository_context(user_id: str, space_id: str, task: dict[str, Any], task_branch: str | None = None) -> dict[str, Any]:
     """Build a bounded, secret-free repository context for one agent turn."""
     try:
         token, project = mongo.github_token_for_space(user_id, space_id)
-        snapshot = repository_snapshot(project["repository_url"], token, project.get("default_branch") or "main")
+        snapshot = repository_snapshot(project["repository_url"], token, task_branch or project.get("default_branch") or "main")
     except (GitHubAuthorizationError, PermissionError, ValueError, RuntimeError):
         return {"available": False, "reason": "No authorized GitHub repository is available for this Space."}
     tree = snapshot.get("tree", [])
@@ -730,6 +766,17 @@ def get_space_task_artifacts(space_id: str, task_id: str, http_request: Request)
         return {"artifacts": mongo.space_task_artifacts(user["id"], space_id, task_id)}
     except PermissionError as exc:
         raise HTTPException(403, str(exc)) from exc
+
+
+@app.post("/api/spaces/{space_id}/tasks/{task_id}/advance", status_code=202)
+def advance_space_task(space_id: str, task_id: str, request: SpaceTaskAdvanceRequest, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        return {"task": mongo.advance_space_task(user["id"], space_id, task_id, request.mode, request.agent_id, request.role)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.delete("/api/spaces/{space_id}/tasks/{task_id}")

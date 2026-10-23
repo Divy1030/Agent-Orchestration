@@ -86,6 +86,12 @@ class SpaceTaskBatchRequest(BaseModel):
     mode: str = Field(default="parallel", pattern=r"^(sequential|parallel)$")
 
 
+class SpaceTaskAdvanceRequest(BaseModel):
+    mode: str = Field(default="auto", pattern=r"^(auto|manual)$")
+    agent_id: str | None = Field(default=None, max_length=64)
+    role: str | None = Field(default=None, pattern=r"^(planner|coder|tester|reviewer|security)$")
+
+
 class SpaceTaskBranchRequest(BaseModel):
     branch: str | None = Field(default=None, max_length=120)
 
@@ -121,6 +127,8 @@ class SpaceProjectSettingsRequest(BaseModel):
     pull_before_commit: bool = True
     require_branch_for_non_owners: bool = True
     require_pull_request_for_non_owners: bool = True
+    require_approval: bool = True
+    auto_proceed: bool = True
 
 
 class GitHubBranchRequest(BaseModel):

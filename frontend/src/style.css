@@ -2879,6 +2879,11 @@
 .agent-current-task { color: #74d59a !important; flex-basis: 100%; text-align: right; }
 .activity-task-card { margin-top: 16px; }
 .activity-task-actions { display: flex; gap: 8px; }
+.activity-task-actions .square-button:last-child { display: none; }
+.activity-task-actions .square-button:nth-last-child(2) { font-size: 0; }
+.activity-task-actions .square-button:nth-last-child(2)::after { content: 'Start tasks'; font-size: 11px; }
+.project-detail-sidebar button:last-child { font-size: 0; }
+.project-detail-sidebar button:last-child::after { content: 'Settings'; font-size: 12px; }
 .task-reset-button { background: rgba(190, 87, 87, .14); border: 1px solid rgba(224, 127, 127, .45); border-radius: 6px; color: #e6a0a0; cursor: pointer; font-size: 11px; padding: 7px 9px; }
 .task-reset-button:hover { background: rgba(190, 87, 87, .26); }
 .activity-task-row { align-items: center; border-top: 1px solid #34415a; display: flex; gap: 12px; justify-content: space-between; padding: 11px 24px; }
@@ -2948,7 +2953,6 @@
 .project-context-editor .space-project-actions { display: flex; justify-content: flex-end; gap: 9px; margin: 0; padding: 14px 24px; border-top: 1px solid #34415a; background: #151d2b; }
 .project-context-editor .space-info-note { margin: 0; padding: 14px 24px; border-top: 1px solid #34415a; color: #9aa8bf; font-size: 11px; }
 .project-settings-panel { min-width: 0; border: 1px solid #34415a; background: #1b2435; }
-.space-detail-content > .project-settings-panel:first-child { display: none; }
 .project-settings-panel > .panel-heading { align-items: flex-start; display: flex; justify-content: space-between; padding: 22px 24px; border-bottom: 1px solid #34415a; background: linear-gradient(135deg, #202b40, #1b2435 68%); }
 .project-settings-panel > .panel-heading h2 { margin: 5px 0 0; color: #f4f7fb; font-size: 20px; }
 .project-settings-panel > .panel-heading p { max-width: 650px; margin: 8px 0 0; color: #9aa8bf; line-height: 1.5; }
@@ -3007,6 +3011,24 @@
 .task-proposed-file code { color: var(--text-color); font-size: 12px; }
 .task-proposed-file pre { background: #101722; color: #b8e3b2; margin: 0; max-height: 260px; overflow: auto; padding: 12px; white-space: pre-wrap; }
 .task-proposal-actions { align-items: center; display: flex; gap: 12px; margin-top: 14px; }
+.task-pipeline-card { display: none; }
+.project-context-resources { display: grid; gap: 16px; margin-top: 16px; }
+.project-context-resource-card { min-width: 0; overflow: hidden; border: 1px solid #34415a; background: #1b2435; }
+.project-context-resource-card .panel-heading { border-bottom: 1px solid #34415a; }
+.project-context-resource-card .panel-heading h2 { display: flex; align-items: center; gap: 8px; }
+.space-collaboration-panel .collaboration-card:has(input[placeholder="Add a durable project fact or decision"]), .space-collaboration-panel .collaboration-card:has(input[placeholder="Skill name, e.g. Secure API review"]) { display: none; }
+.space-collaboration-panel .collaboration-card:has(input[placeholder="Request approval for an action"]) { display: none; }
+.task-pipeline-controls { align-items: center; display: flex; flex-wrap: wrap; gap: 9px; padding: 14px 24px; border-top: 1px solid #34415a; }
+.task-pipeline-controls select { min-width: 220px; border: 1px solid #3c4d6b; border-radius: 6px; background: #202b40; color: #c3ccdc; padding: 8px 10px; }
+.task-execution-timeline { display: grid; gap: 8px; margin-top: 8px; padding: 10px 0 0; border-top: 1px solid #34415a; }
+.task-execution-meta, .task-execution-files, .task-execution-tests { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; color: #8fa1bb; font-size: 10px; }
+.task-execution-meta span, .task-execution-tests span { display: inline-flex; align-items: center; gap: 4px; }
+.task-execution-meta .live { color: #f3c16b; }
+.task-output-spinner-small { animation: task-output-spin 1s linear infinite; }
+.task-execution-files strong, .task-execution-tests strong { color: #bdc9dc; font-size: 10px; }
+.task-execution-files code { color: #8ee6b0; }
+.task-execution-event { display: flex; align-items: center; gap: 8px; color: #9aa8bf; font-size: 10px; }
+.task-execution-event i { width: 5px; height: 5px; border-radius: 50%; background: #765fda; }
 .task-batch-controls { align-items: center; display: flex; grid-column: 1 / -1; justify-content: space-between; }
 .task-batch-controls small { color: var(--muted-text); display: block; margin-top: 4px; }
 .task-batch-actions { display: flex; gap: 8px; }
@@ -3014,6 +3036,7 @@
 .task-batch-controls strong { color: #e8edf8; font-size: 13px; letter-spacing: .02em; }
 .task-batch-controls small { font-size: 11px; line-height: 1.45; max-width: 520px; }
 .task-batch-actions button { min-width: 132px; }
+.task-add-only { display: flex; grid-column: 1 / -1; justify-content: flex-end; margin: 0 0 14px; width: 100%; }
 .task-delete-strip { align-items: flex-start; display: flex; gap: 18px; grid-column: 1 / -1; justify-content: space-between; }
 .task-delete-strip small { color: var(--muted-text); display: block; font-size: 11px; margin-top: 4px; }
 .task-delete-list { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
@@ -3058,7 +3081,7 @@
 .task-edit-dialog .task-edit-grid input, .task-edit-dialog .task-edit-grid textarea, .task-edit-dialog .task-edit-grid select { background: #202b40; border: 1px solid #3c4d6b; border-radius: 7px; color: #e0e7f2; font: inherit; padding: 9px 10px; resize: vertical; }
 .task-edit-dialog .task-edit-grid input:focus, .task-edit-dialog .task-edit-grid textarea:focus, .task-edit-dialog .task-edit-grid select:focus { border-color: #789bff; box-shadow: 0 0 0 3px rgba(120, 155, 255, .12); outline: 0; }
 .task-edit-dialog-actions { align-items: center; display: flex; justify-content: flex-end; gap: 14px; margin-top: 20px; }
-.collaboration-card:has(.task-create-form) { overflow: hidden; }
+.collaboration-card:has(.task-create-form) { display: none; }
 .task-item { background: rgba(11, 18, 30, .18); border: 1px solid rgba(67, 86, 119, .32); border-radius: 9px; margin-top: 8px; padding: 4px 10px 10px; transition: border-color .18s ease, background .18s ease; }
 .task-item:hover { background: rgba(31, 45, 70, .28); border-color: rgba(103, 133, 201, .6); }
 .task-item .collaboration-row { border-bottom: 0; padding: 8px 0 5px; }

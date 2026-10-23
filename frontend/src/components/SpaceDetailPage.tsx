@@ -14,7 +14,7 @@ export default function SpaceDetailPage({ spaceId, onBack }: Props) {
   const { connectGithub } = useClerkApp();
   const [space, setSpace] = useState<any>(null), [agents, setAgents] = useState<any[]>([]), [availableAgents, setAvailableAgents] = useState<any[]>([]), [members, setMembers] = useState<any[]>([]);
   const [tab, setTab] = useState<Tab>('overview'), [ownerCode, setOwnerCode] = useState(''), [collaboratorConfirmed, setCollaboratorConfirmed] = useState(false), [repo, setRepo] = useState(''), [branch, setBranch] = useState('main');
-  const [message, setMessage] = useState(''), [busy, setBusy] = useState(false), [githubBusy, setGithubBusy] = useState(false), [agentBusy, setAgentBusy] = useState(false), [showAgentPicker, setShowAgentPicker] = useState(false), [agentRole, setAgentRole] = useState('coder'), [showProjectPage, setShowProjectPage] = useState(false);
+  const [message, setMessage] = useState(''), [busy, setBusy] = useState(false), [githubBusy, setGithubBusy] = useState(false), [agentBusy, setAgentBusy] = useState(false), [showAgentPicker, setShowAgentPicker] = useState(false), [agentRole, setAgentRole] = useState('coder'), [showProjectPage, setShowProjectPage] = useState(() => /\/spaces\/[^/]+\/(?:project|work)$/.test(window.location.pathname));
 
   const load = async () => {
     const [detail, assigned, memberRows] = await Promise.all([api<{ space: any }>(`/api/spaces/${spaceId}`), api<{ agents: any[] }>(`/api/spaces/${spaceId}/agents`), api<{ members: any[] }>(`/api/spaces/${spaceId}/members`)]);
@@ -33,11 +33,12 @@ export default function SpaceDetailPage({ spaceId, onBack }: Props) {
   useEffect(() => {
     if (!space) return;
     const projectPath = `/spaces/${encodeURIComponent(space.project_slug || space.slug)}/work`;
-    setShowProjectPage(window.location.pathname === projectPath);
-    const onPopState = () => setShowProjectPage(window.location.pathname === projectPath);
+    const legacyProjectPath = `/spaces/${encodeURIComponent(space.project_slug || space.slug)}/project`;
+    setShowProjectPage(window.location.pathname === projectPath || window.location.pathname === legacyProjectPath);
+    const onPopState = () => setShowProjectPage(window.location.pathname === projectPath || window.location.pathname === legacyProjectPath);
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
-  }, [space?.slug]);
+  }, [space?.slug, space?.project_slug]);
   const openAgentPicker = async () => { setAgentBusy(true); try { const result = await api<{ agents: any[] }>(`/api/spaces/${spaceId}/agents/available`); setAvailableAgents(result.agents); setShowAgentPicker(true); } catch (error: any) { setMessage(error.message); } finally { setAgentBusy(false); } };
   const assignAgent = async (agentId: string) => { setAgentBusy(true); try { await api(`/api/spaces/${spaceId}/agents`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agent_id: agentId, role: agentRole }) }); setMessage('Agent added to this Space.'); await load(); const result = await api<{ agents: any[] }>(`/api/spaces/${spaceId}/agents/available`); setAvailableAgents(result.agents); } catch (error: any) { setMessage(error.message); } finally { setAgentBusy(false); } };
   const updateAgentRole = async (agentId: string, role: string) => { setAgentBusy(true); try { await api(`/api/spaces/${spaceId}/agents/${agentId}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role }) }); setAgents(current => current.map(agent => agent.id === agentId ? { ...agent, role } : agent)); setMessage('Agent role updated.'); } catch (error: any) { setMessage(error.message); } finally { setAgentBusy(false); } };
