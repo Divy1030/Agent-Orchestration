@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import os
+import asyncio
 from pathlib import Path
 from copy import deepcopy
 from typing import Any
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -20,14 +21,15 @@ from backend.auth_models import (FlowSaveRequest, GitHubBranchRequest, GitHubCom
                                   LoginRequest, PublicChatRequest, RegisterRequest, ResourceRequest, SessionCreateRequest,
                                   SpaceContextRequest,
                                   SpaceMemoryRequest, SpaceSkillRequest, SpaceTaskRequest, SpaceTaskStatusRequest,
-                                  SpaceApprovalRequest,
+                                  SpaceTaskBranchRequest, SpaceTaskPullRequestRequest, SpaceTaskApplyProposalRequest, SpaceApprovalRequest,
+                                  SpaceTaskRejectProposalRequest, SpaceTaskBatchRequest, SpaceTaskUpdateRequest,
                                   SpaceAgentRequest, SpaceAgentRoleRequest, SpaceJoinCodeRequest, SpaceJoinRequest, SpaceMemberRoleRequest,
-                                  SpaceProjectRequest, WorkspaceRequest)
+                                  SpaceProjectRequest, SpaceProjectSettingsRequest, WorkspaceRequest)
 from backend.mongo_store import MongoRuntimeStore, MongoStore, now as mongo_store_now, verify_password
 from backend.clerk_auth import ClerkAuthError, clerk_user_from_request
 from backend.secure_store import decrypt_secret, encrypt_secret
-from backend.github_service import (GitHubAuthorizationError, clerk_github_token, commit_files, create_branch,
-                                    create_pull_request, github_app_install_url, github_app_installation_token,
+from backend.github_service import (GitHubAuthorizationError, clerk_github_token, commit_files, create_branch, ensure_branch_is_current,
+                                    create_pull_request, github_app_install_url, github_app_installation_token, repository_branches,
                                     github_app_state, github_app_state_payload, read_file, repository_snapshot,
                                     verify_repository)
 
@@ -76,7 +78,7 @@ async def execute_agent(node: dict[str, Any], messages: list[dict[str, str]]) ->
             raise ValueError("Connected agent was not found")
         # Agent documents are the source of truth. Keep only the node fallback
         # reply locally so a disconnected/renamed agent cannot silently drift.
-        node_guidance = {key: config[key] for key in ("workflow_instructions", "routing_instructions", "instructions", "tools") if key in config}
+        node_guidance = {key: config[key] for key in ("workflow_instructions", "routing_instructions", "instructions", "tools", "model", "temperature", "max_tokens") if key in config}
         config = {**agent.get("config", {}), **node_guidance,
                   "reply": config.get("reply", agent.get("config", {}).get("reply", ""))}
     attached_tools = [tool for tool in config.get("tools", []) if isinstance(tool, dict)]
@@ -105,9 +107,17 @@ async def execute_agent(node: dict[str, Any], messages: list[dict[str, str]]) ->
     workspace_id = node.get("workspace_id") or config.get("workspace_id")
     workspace_key = None
     if workspace_id:
-        row = mongo.db.workspace_credentials.find_one({"workspace_id": __import__("bson").ObjectId(workspace_id), "provider": "openrouter"}) if mongo.configured else None
+        from bson import ObjectId
+        row = mongo.db.workspace_credentials.find_one({"workspace_id": ObjectId(workspace_id), "provider": "openrouter"}) if mongo.configured else None
+        if not row and mongo.configured and agent_id:
+            agent_row = mongo.db.agents.find_one({"_id": ObjectId(agent_id)}, {"workspace_id": 1})
+            agent_workspace_id = (agent_row or {}).get("workspace_id")
+            if agent_workspace_id and str(agent_workspace_id) != str(ObjectId(workspace_id)):
+                row = mongo.db.workspace_credentials.find_one({"workspace_id": agent_workspace_id, "provider": "openrouter"})
         if row:
-            workspace_key = decrypt_secret(row["encrypted_value"])
+            workspace_key = decrypt_secret(row["encrypted_value"]).strip()
+        if not workspace_key:
+            raise RuntimeError("Workspace OpenRouter key is not configured. Add and test the encrypted key in Settings before running this workflow.")
         assignment = mongo.db.space_agents.find_one({"workspace_id": __import__("bson").ObjectId(workspace_id), "agent_id": __import__("bson").ObjectId(agent_id)}) if mongo.configured and agent_id else None
         if assignment:
             config["project_role"] = assignment.get("role", "coder")
@@ -127,6 +137,163 @@ async def execute_agent(node: dict[str, Any], messages: list[dict[str, str]]) ->
         if workspace_id and agent_id and mongo.configured:
             mongo.set_agent_presence(str(workspace_id), str(agent_id), "idle")
             mongo.record_space_activity(str(workspace_id), "agent_completed", "Agent finished its workflow turn", str(agent_id))
+
+
+async def run_space_task(space_id: str, task_id: str, user_id: str) -> None:
+    """Run one claimed Space task and leave it in review for human/PR handoff."""
+    try:
+        from bson import ObjectId
+        task = mongo.db.space_tasks.find_one({"_id": ObjectId(task_id), "workspace_id": ObjectId(space_id)})
+        if not task or not task.get("assignee_agent_id"):
+            raise ValueError("The task has no assigned agent")
+        assignment = mongo.db.space_agents.find_one({"workspace_id": ObjectId(space_id), "agent_id": task["assignee_agent_id"]})
+        role = (assignment or {}).get("role", "coder")
+        mongo.update_space_task_phase(space_id, task_id, "reading_repository")
+        shared_context = mongo.shared_agent_context(space_id)
+        repository_context = await build_task_repository_context(user_id, space_id, task)
+        dependency_artifacts = mongo.dependency_artifacts(space_id, task)
+        artifact_context = "\n\n".join(f"[{item.get('artifact_type', 'artifact')}]\n{item.get('content', '')[:60000]}" for item in dependency_artifacts) or "No predecessor artifacts are available."
+        prompt = f"""You are the assigned {role} agent for a collaborative software project.
+
+Task title: {task.get('title', '')}
+Task description: {task.get('description', '') or 'No additional description was provided.'}
+Priority: {task.get('priority', 'normal')}
+
+Use the shared project memory, skills, patterns, open tasks, repository snapshot, and predecessor artifacts below as context. The repository snapshot is pinned to one commit SHA; do not assume files changed outside it. Do not claim that code was changed, committed, or pushed. For planning tasks, produce a structured plan with files, reasons, dependencies, acceptance criteria, and verification. For implementation tasks, when you can safely specify the exact text, include proposed file changes in this exact JSON shape inside a fenced json block: {{"summary":"...","files":[{{"path":"safe/relative/path","content":"complete UTF-8 file content"}}],"verification":["..."]}}. For test or review tasks, report concrete findings and verification results. Only include complete files you are confident should change; never include secrets, credentials, binary data, or paths outside the repository.
+
+Shared context:
+{shared_context}
+
+Repository context (server-fetched, bounded, and pinned):
+{repository_context}
+
+Artifacts produced by predecessor tasks:
+{artifact_context}
+"""
+        mongo.update_space_task_phase(space_id, task_id, "calling_model")
+        result = await execute_agent({"type": "agent", "workspace_id": space_id,
+                                      "config": {"agent_id": str(task["assignee_agent_id"]),
+                                                 "workspace_id": space_id, "project_role": role,
+                                                 "max_tokens": 12000, "temperature": 0.1}},
+                                     [{"role": "user", "content": prompt}])
+        reply = result.get("reply", "")
+        mongo.update_space_task_phase(space_id, task_id, "saving_result")
+        proposal = extract_agent_proposal(reply)
+        output_status = "complete" if proposal or role in {"planner", "tester", "reviewer"} else "unstructured"
+        mongo.finish_space_task(space_id, task_id, {"reply": reply, "provider": result.get("provider"),
+                                                     "model": result.get("model"), "role": role,
+                                                     "output_status": output_status})
+        if proposal:
+            from bson import ObjectId
+            mongo.db.space_tasks.update_one({"_id": ObjectId(task_id), "workspace_id": ObjectId(space_id)},
+                                            {"$set": {"execution.proposed_changes": proposal}})
+        artifact_type = "plan" if role == "planner" or task.get("task_type") == "plan" else ("test" if role == "tester" or task.get("task_type") == "test" else ("review" if role == "reviewer" or task.get("task_type") == "review" else "implementation"))
+        mongo.add_space_task_artifact(space_id, task_id, artifact_type, reply,
+                                      {"role": role, "branch": repository_context.get("branch"), "branch_sha": repository_context.get("branch_sha"),
+                                       "files_read": repository_context.get("files_read", [])}, user_id)
+    except Exception as exc:
+        mongo.fail_space_task(space_id, task_id, f"{type(exc).__name__}: {exc}")
+
+
+async def build_task_repository_context(user_id: str, space_id: str, task: dict[str, Any]) -> dict[str, Any]:
+    """Build a bounded, secret-free repository context for one agent turn."""
+    try:
+        token, project = mongo.github_token_for_space(user_id, space_id)
+        snapshot = repository_snapshot(project["repository_url"], token, project.get("default_branch") or "main")
+    except (GitHubAuthorizationError, PermissionError, ValueError, RuntimeError):
+        return {"available": False, "reason": "No authorized GitHub repository is available for this Space."}
+    tree = snapshot.get("tree", [])
+    task_text = f"{task.get('title', '')} {task.get('description', '')}".lower()
+    important = {"readme.md", "package.json", "pyproject.toml", "requirements.txt", "go.mod", "cargo.toml", "tsconfig.json", "next.config.js", "next.config.mjs", "vite.config.ts"}
+    candidates = [item for item in tree if item.get("type") == "blob" and isinstance(item.get("path"), str)
+                  and not item["path"].startswith((".git/", ".env", "node_modules/"))
+                  and not item["path"].endswith((".lock", ".map"))]
+    def score(item: dict[str, Any]) -> tuple[int, str]:
+        path = item["path"]
+        lower = path.lower()
+        name = lower.rsplit("/", 1)[-1]
+        points = 100 if name in important else 0
+        points += sum(8 for word in task_text.split() if len(word) > 3 and word in lower)
+        points += 4 if lower.startswith(("src/", "app/", "api/", "backend/", "frontend/")) else 0
+        return (-points, path)
+    selected = sorted(candidates, key=score)[:12]
+    files, total_bytes = [], 0
+    for item in selected:
+        try:
+            opened = read_file(project["repository_url"], token, item["path"], snapshot.get("branch"))
+        except GitHubAuthorizationError:
+            continue
+        content = opened.get("content", "")
+        size = len(content.encode("utf-8"))
+        if size > 40_000 or total_bytes + size > 220_000:
+            continue
+        total_bytes += size
+        files.append({"path": item["path"], "content": content})
+    return {"available": True, "repository": snapshot.get("full_name"), "branch": snapshot.get("branch"),
+            "branch_sha": snapshot.get("branch_sha"), "tree": snapshot.get("tree", [])[:250],
+            "recent_commits": snapshot.get("commits", [])[:10], "files": files,
+            "files_read": [file["path"] for file in files]}
+
+
+async def run_space_task_batch(space_id: str, user_id: str, mode: str) -> None:
+    """Run dependency-ready tasks in waves; each task remains independently observable."""
+    while True:
+        ready = mongo.ready_space_tasks(user_id, space_id)
+        if not ready:
+            return
+        if mode == "sequential":
+            task = ready[0]
+            try:
+                mongo.claim_space_task(user_id, space_id, task["id"])
+            except (PermissionError, ValueError):
+                return
+            await run_space_task(space_id, task["id"], user_id)
+            latest = mongo.db.space_tasks.find_one({"_id": __import__("bson").ObjectId(task["id"]), "workspace_id": __import__("bson").ObjectId(space_id)}, {"execution.status": 1}) or {}
+            if (latest.get("execution") or {}).get("status") == "failed":
+                return
+            continue
+        claimed = []
+        for task in ready:
+            try:
+                mongo.claim_space_task(user_id, space_id, task["id"])
+                claimed.append(task["id"])
+            except (PermissionError, ValueError):
+                continue
+        if not claimed:
+            return
+        await asyncio.gather(*(run_space_task(space_id, task_id, user_id) for task_id in claimed))
+        failed = mongo.db.space_tasks.count_documents({"_id": {"$in": [__import__("bson").ObjectId(task_id) for task_id in claimed]}, "execution.status": "failed"})
+        if failed:
+            return
+
+
+def extract_agent_proposal(reply: str) -> dict[str, Any] | None:
+    """Accept only a bounded, repository-relative proposal from the agent output."""
+    import json
+    import re
+    match = re.search(r"```json\s*(\{.*?\})\s*```", reply or "", re.DOTALL | re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        payload = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return None
+    files = payload.get("files") if isinstance(payload, dict) else None
+    if not isinstance(files, list) or not files or len(files) > 20:
+        return None
+    clean_files = []
+    total_bytes = 0
+    for item in files:
+        path = str(item.get("path", "")).strip().lstrip("/") if isinstance(item, dict) else ""
+        content = item.get("content") if isinstance(item, dict) else None
+        if not path or ".." in path.split("/") or path.startswith(".git/") or not isinstance(content, str):
+            return None
+        total_bytes += len(content.encode("utf-8"))
+        if len(content.encode("utf-8")) > 250_000 or total_bytes > 1_000_000:
+            return None
+        clean_files.append({"path": path, "content": content})
+    return {"summary": str(payload.get("summary", ""))[:2000], "files": clean_files, "status": "pending",
+            "verification": [str(item)[:500] for item in payload.get("verification", [])[:20]] if isinstance(payload.get("verification", []), list) else []}
 
 
 def _tool_matches_message(tool: dict[str, Any], message: str) -> bool:
@@ -546,14 +713,167 @@ def create_space_task(space_id: str, request: SpaceTaskRequest, http_request: Re
 
 
 @app.patch("/api/spaces/{space_id}/tasks/{task_id}")
-def update_space_task(space_id: str, task_id: str, request: SpaceTaskStatusRequest, http_request: Request) -> dict[str, Any]:
+def update_space_task(space_id: str, task_id: str, request: SpaceTaskUpdateRequest, http_request: Request) -> dict[str, Any]:
     user = current_user(http_request)
     try:
-        return {"task": mongo.update_space_task_status(user["id"], space_id, task_id, request.status)}
+        return {"task": mongo.update_space_task(user["id"], space_id, task_id, request.model_dump(exclude_unset=True))}
     except PermissionError as exc:
         raise HTTPException(403, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
+
+
+@app.get("/api/spaces/{space_id}/tasks/{task_id}/artifacts")
+def get_space_task_artifacts(space_id: str, task_id: str, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        return {"artifacts": mongo.space_task_artifacts(user["id"], space_id, task_id)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@app.delete("/api/spaces/{space_id}/tasks/{task_id}")
+def delete_space_task(space_id: str, task_id: str, http_request: Request) -> dict[str, bool]:
+    user = current_user(http_request)
+    try:
+        mongo.delete_space_task(user["id"], space_id, task_id)
+        return {"ok": True}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/spaces/{space_id}/tasks/{task_id}/start", status_code=202)
+def start_space_task(space_id: str, task_id: str, background_tasks: BackgroundTasks, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        task = mongo.claim_space_task(user["id"], space_id, task_id)
+        background_tasks.add_task(run_space_task, space_id, task_id, user["id"])
+        return {"task": task, "message": "The assigned agent has started working. Results will be ready for review."}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/spaces/{space_id}/tasks/start-all", status_code=202)
+def start_all_space_tasks(space_id: str, request: SpaceTaskBatchRequest, background_tasks: BackgroundTasks, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        ready = mongo.ready_space_tasks(user["id"], space_id)
+        if not ready:
+            tasks = mongo.space_tasks(user["id"], space_id)
+            todo = [task for task in tasks if task.get("status") == "todo"]
+            if not todo:
+                raise ValueError("No tasks are waiting to start. Add a task or move an existing task back to To do.")
+            if any(not task.get("assignee_agent_id") for task in todo):
+                raise ValueError("No task agent is assigned. Assign at least one agent to this Space before starting the queue.")
+            if any(task.get("depends_on") for task in todo):
+                waiting = sum(1 for task in todo if task.get("depends_on"))
+                raise ValueError(f"{waiting} task(s) are waiting for dependent tasks to finish.")
+            status_counts = ", ".join(f"{status}={sum(1 for task in tasks if task.get('status') == status)}" for status in ("todo", "in_progress", "review", "done"))
+            raise ValueError(f"No dependency-ready tasks are available ({status_counts}).")
+        background_tasks.add_task(run_space_task_batch, space_id, user["id"], request.mode)
+        return {"mode": request.mode, "started_count": len(ready), "message": "Ready tasks have been queued."}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/spaces/{space_id}/tasks/reset-running")
+def reset_running_space_tasks(space_id: str, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        count = mongo.reset_running_space_tasks(user["id"], space_id)
+        return {"reset_count": count, "message": f"Reset {count} running task(s). They can now be started again."}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
+@app.post("/api/spaces/{space_id}/tasks/{task_id}/branch")
+def prepare_space_task_branch(space_id: str, task_id: str, request: SpaceTaskBranchRequest, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        token, project = github_contributor_context(user["id"], space_id)
+        task = mongo.space_task_for_user(user["id"], space_id, task_id)
+        branch = (request.branch or f"agent/task-{task_id[:8]}").strip()
+        result = create_branch(project["repository_url"], token, branch, project.get("default_branch") or "main")
+        return {"task": mongo.set_space_task_branch(space_id, task_id, result["branch"], result.get("sha")), "branch": result}
+    except GitHubAuthorizationError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@app.post("/api/spaces/{space_id}/tasks/{task_id}/pull-request")
+def open_space_task_pull_request(space_id: str, task_id: str, request: SpaceTaskPullRequestRequest, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        token, project = github_contributor_context(user["id"], space_id)
+        task = mongo.space_task_for_user(user["id"], space_id, task_id)
+        branch = (task.get("execution") or {}).get("branch")
+        if not branch:
+            raise ValueError("Prepare a task branch before opening a pull request")
+        title = request.title.strip() or task.get("title", "Agent task")
+        pull_request = create_pull_request(project["repository_url"], token, title, request.body, branch, project.get("default_branch") or "main")
+        return {"task": mongo.set_space_task_pull_request(space_id, task_id, pull_request), "pull_request": pull_request}
+    except GitHubAuthorizationError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@app.post("/api/spaces/{space_id}/tasks/{task_id}/apply-proposal")
+def apply_space_task_proposal(space_id: str, task_id: str, request: SpaceTaskApplyProposalRequest, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        token, project = github_owner_commit_context(user["id"], space_id)
+        task = mongo.space_task_for_user(user["id"], space_id, task_id)
+        execution = task.get("execution") or {}
+        branch = execution.get("branch")
+        proposal = execution.get("proposed_changes") or {}
+        files = proposal.get("files") if isinstance(proposal, dict) else None
+        if not branch:
+            raise ValueError("Prepare a task branch before applying the proposal")
+        if not isinstance(files, list) or not files:
+            raise ValueError("This task has no valid proposed file changes to apply")
+        selected_paths = {path.strip().lstrip("/") for path in request.paths if path.strip()} if request.paths else None
+        if selected_paths is not None:
+            files = [file for file in files if file.get("path") in selected_paths]
+            if not files:
+                raise ValueError("Select at least one proposed file to apply")
+        message = request.message.strip() or f"Apply agent proposal: {task.get('title', 'task')}"
+        commit = commit_files(project["repository_url"], token, branch, message, files)
+        return {"task": mongo.set_space_task_commit(space_id, task_id, commit), "commit": commit}
+    except GitHubAuthorizationError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@app.post("/api/spaces/{space_id}/tasks/{task_id}/reject-proposal")
+def reject_space_task_proposal(space_id: str, task_id: str, request: SpaceTaskRejectProposalRequest, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        return {"task": mongo.reject_space_task_proposal(user["id"], space_id, task_id, request.reason.strip())}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.get("/api/spaces/{space_id}/approvals")
@@ -643,6 +963,29 @@ def save_space_project(space_id: str, request: SpaceProjectRequest, http_request
     user = current_user(http_request)
     try:
         return {"project": mongo.save_space_project(user["id"], space_id, request.repository_url, request.default_branch)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/api/spaces/{space_id}/project/settings")
+def get_space_project_settings(space_id: str, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        return {"settings": mongo.space_project_settings(user["id"], space_id),
+                "can_manage": mongo.space_detail(user["id"], space_id).get("role") == "owner"}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.patch("/api/spaces/{space_id}/project/settings")
+def update_space_project_settings(space_id: str, request: SpaceProjectSettingsRequest, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        return {"settings": mongo.update_space_project_settings(user["id"], space_id, request.model_dump())}
     except PermissionError as exc:
         raise HTTPException(403, str(exc)) from exc
     except ValueError as exc:
@@ -844,11 +1187,33 @@ def get_space_github_file(space_id: str, path: str, http_request: Request, branc
         raise HTTPException(503, str(exc)) from exc
 
 
+@app.get("/api/spaces/{space_id}/github/branches")
+def list_space_github_branches(space_id: str, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        detail = mongo.space_detail(user["id"], space_id)
+        if detail.get("role") != "owner":
+            raise PermissionError("Only the Space owner can view project Git settings")
+        token, project = mongo.github_token_for_space(user["id"], space_id)
+        return {"branches": repository_branches(project["repository_url"], token)}
+    except GitHubAuthorizationError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
 @app.post("/api/spaces/{space_id}/github/branches")
 def create_space_github_branch(space_id: str, request: GitHubBranchRequest, http_request: Request) -> dict[str, Any]:
     user = current_user(http_request)
     try:
         token, project = github_contributor_context(user["id"], space_id)
+        settings = mongo.space_project_settings(user["id"], space_id)
+        if mongo.space_detail(user["id"], space_id).get("role") != "owner" and settings["require_branch_for_non_owners"] and request.branch.strip() == settings["default_branch"]:
+            raise ValueError("Non-owner changes must use a dedicated branch")
         return {"branch": create_branch(project["repository_url"], token, request.branch, request.from_branch)}
     except GitHubAuthorizationError as exc:
         raise HTTPException(exc.status_code, str(exc)) from exc
@@ -865,6 +1230,9 @@ def commit_space_github_files(space_id: str, request: GitHubCommitRequest, http_
     user = current_user(http_request)
     try:
         token, project = github_owner_commit_context(user["id"], space_id)
+        settings = mongo.space_project_settings(user["id"], space_id)
+        if settings["pull_before_commit"]:
+            ensure_branch_is_current(project["repository_url"], token, request.branch, settings["default_branch"])
         return {"commit": commit_files(project["repository_url"], token, request.branch, request.message, request.files)}
     except GitHubAuthorizationError as exc:
         raise HTTPException(exc.status_code, str(exc)) from exc
@@ -881,6 +1249,10 @@ def create_space_github_pull_request(space_id: str, request: GitHubPullRequestRe
     user = current_user(http_request)
     try:
         token, project = github_contributor_context(user["id"], space_id)
+        settings = mongo.space_project_settings(user["id"], space_id)
+        detail = mongo.space_detail(user["id"], space_id)
+        if detail.get("role") != "owner" and settings["require_pull_request_for_non_owners"] and request.head.strip() == request.base.strip():
+            raise ValueError("Non-owner changes must be submitted from a separate branch")
         return {"pull_request": create_pull_request(project["repository_url"], token, request.title, request.body, request.head, request.base)}
     except GitHubAuthorizationError as exc:
         raise HTTPException(exc.status_code, str(exc)) from exc
@@ -944,9 +1316,12 @@ def list_workspace_credentials(workspace_id: str, http_request: Request) -> dict
 def rotate_workspace_credential(workspace_id: str, request: WorkspaceCredentialRequest, http_request: Request) -> dict[str, Any]:
     user = current_user(http_request)
     try:
+        normalized_key = request.key.strip()
+        if not normalized_key:
+            raise HTTPException(422, "OpenRouter key cannot be blank")
         result = mongo.save_workspace_credential(user["id"], workspace_id, request.provider,
-                                                 encrypt_secret(request.key), request.label.strip() or request.provider.title(),
-                                                 request.key[-4:])
+                                                 encrypt_secret(normalized_key), request.label.strip() or request.provider.title(),
+                                                 normalized_key[-4:])
         return {"credential": result}
     except PermissionError as exc:
         raise HTTPException(403, str(exc)) from exc
@@ -961,9 +1336,11 @@ async def test_workspace_credential(workspace_id: str, provider: str, http_reque
         row = mongo.get_workspace_credential(user["id"], workspace_id, provider)
         if not row:
             raise HTTPException(404, "Credential not found")
-        key = decrypt_secret(row["encrypted_value"])
+        key = decrypt_secret(row["encrypted_value"]).strip()
         if provider == "openrouter":
-            url, headers = "https://openrouter.ai/api/v1/models", {"Authorization": f"Bearer {key}"}
+            # /models is a public catalog and may return 200 even for an
+            # invalid bearer token. /key validates the credential itself.
+            url, headers = "https://openrouter.ai/api/v1/key", {"Authorization": f"Bearer {key}"}
         else:
             raise HTTPException(400, "Unsupported provider")
         async with httpx.AsyncClient(timeout=httpx.Timeout(8, connect=3)) as client:
@@ -974,8 +1351,18 @@ async def test_workspace_credential(workspace_id: str, provider: str, http_reque
         return {"ok": True, "provider": provider}
     except HTTPException:
         raise
+    except httpx.HTTPStatusError as exc:
+        detail = ""
+        try:
+            payload = exc.response.json()
+            if isinstance(payload, dict):
+                error_payload = payload.get("error")
+                detail = str(error_payload.get("message") if isinstance(error_payload, dict) else error_payload or payload.get("message") or "")
+        except (ValueError, TypeError):
+            detail = ""
+        raise HTTPException(502, f"{provider.title()} rejected this key (HTTP {exc.response.status_code}): {detail[:300] or exc.response.reason_phrase}") from exc
     except Exception as exc:
-        raise HTTPException(502, f"{provider.title()} key test failed") from exc
+        raise HTTPException(502, f"{provider.title()} key test failed: {str(exc)[:300]}") from exc
 
 
 @app.delete("/api/workspaces/{workspace_id}/credentials/{provider}")
@@ -1270,14 +1657,19 @@ async def send_session_message(session_id: str, request: MessageRequest, http_re
         if not session:
             raise ValueError("Session not found")
         flow = FLOW
+        workspace_id = None
         if session.get("flow_id") != FLOW["id"]:
             user = current_user(http_request)
             stored_flow = mongo.get_flow(user["id"], session["flow_id"])
             if not stored_flow or not stored_flow.get("flow"):
                 raise ValueError("Workflow version is missing")
             flow = validate_flow(stored_flow["flow"])
+            workspace_id = stored_flow.get("workspace_id")
+            if workspace_id:
+                flow["workspace_id"] = workspace_id
         store = require_mongo()
-        store.consume_workspace_execution(str(stored_flow.get("workspace_id")))
+        if workspace_id:
+            store.consume_workspace_execution(str(workspace_id))
         return await runtime.turn(flow, session_id, request.message, runtime_route)
     except PermissionError as exc:
         raise HTTPException(402, str(exc)) from exc

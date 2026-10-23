@@ -64,11 +64,44 @@ class SpaceTaskRequest(BaseModel):
     description: str = Field(default="", max_length=3000)
     status: str = Field(default="todo", pattern=r"^(todo|in_progress|review|done)$")
     priority: str = Field(default="normal", pattern=r"^(low|normal|high|urgent)$")
+    task_type: str = Field(default="code", pattern=r"^(plan|code|fix|review|test|security)$")
+    depends_on: list[str] = Field(default_factory=list, max_length=20)
     assignee_agent_id: str | None = Field(default=None, max_length=64)
 
 
 class SpaceTaskStatusRequest(BaseModel):
     status: str = Field(pattern=r"^(todo|in_progress|review|done)$")
+
+
+class SpaceTaskUpdateRequest(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=180)
+    description: str | None = Field(default=None, max_length=3000)
+    task_type: str | None = Field(default=None, pattern=r"^(plan|code|fix|review|test|security)$")
+    priority: str | None = Field(default=None, pattern=r"^(low|normal|high|urgent)$")
+    assignee_agent_id: str | None = Field(default=None, max_length=64)
+    status: str | None = Field(default=None, pattern=r"^(todo|in_progress|review|done)$")
+
+
+class SpaceTaskBatchRequest(BaseModel):
+    mode: str = Field(default="parallel", pattern=r"^(sequential|parallel)$")
+
+
+class SpaceTaskBranchRequest(BaseModel):
+    branch: str | None = Field(default=None, max_length=120)
+
+
+class SpaceTaskPullRequestRequest(BaseModel):
+    title: str = Field(default="", max_length=256)
+    body: str = Field(default="", max_length=10000)
+
+
+class SpaceTaskApplyProposalRequest(BaseModel):
+    message: str = Field(default="", max_length=200)
+    paths: list[str] = Field(default_factory=list, max_length=20)
+
+
+class SpaceTaskRejectProposalRequest(BaseModel):
+    reason: str = Field(default="", max_length=1000)
 
 
 class SpaceApprovalRequest(BaseModel):
@@ -81,6 +114,13 @@ class SpaceApprovalRequest(BaseModel):
 class SpaceProjectRequest(BaseModel):
     repository_url: str = Field(min_length=10, max_length=500)
     default_branch: str = Field(default="main", min_length=1, max_length=120)
+
+
+class SpaceProjectSettingsRequest(BaseModel):
+    default_branch: str = Field(default="main", min_length=1, max_length=120)
+    pull_before_commit: bool = True
+    require_branch_for_non_owners: bool = True
+    require_pull_request_for_non_owners: bool = True
 
 
 class GitHubBranchRequest(BaseModel):

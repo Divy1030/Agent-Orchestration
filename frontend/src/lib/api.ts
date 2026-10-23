@@ -9,7 +9,15 @@ export async function api<T = any>(url: string, init?: RequestInit): Promise<T> 
   const headers = new Headers(init?.headers);
   const token = await clerkTokenGetter?.();
   if (token) headers.set('Authorization', `Bearer ${token}`);
-  const response = await fetch(`${API_BASE_URL}${url}`, { ...init, headers, credentials: 'include' });
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${url}`, { ...init, headers, credentials: 'include' });
+  } catch (error) {
+    if (error instanceof TypeError) {
+      throw Error('The API is unavailable. Start the backend with `uvicorn backend.app:app --reload --port 8000`, then try again.');
+    }
+    throw error;
+  }
   const text = await response.text();
   let body: any;
   try { body = text ? JSON.parse(text) : {}; } catch { body = { detail: text || 'Request failed' }; }

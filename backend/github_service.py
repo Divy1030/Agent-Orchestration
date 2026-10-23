@@ -199,6 +199,12 @@ def repository_snapshot(repository_url: str, token: str, branch: str | None = No
                          "date": (item.get("commit", {}).get("author") or {}).get("date")} for item in commits]}
 
 
+def repository_branches(repository_url: str, token: str) -> list[str]:
+    owner, repository = _repository_parts(repository_url)
+    branches = _github_request(token, "GET", f"/repos/{owner}/{repository}/branches", params={"per_page": 100})
+    return [str(item.get("name")) for item in branches if item.get("name")]
+
+
 def read_file(repository_url: str, token: str, path: str, branch: str | None = None) -> dict:
     clean_path = path.strip().lstrip("/")
     if not clean_path or ".." in clean_path.split("/") or clean_path.startswith(".git/"):
@@ -224,6 +230,18 @@ def create_branch(repository_url: str, token: str, branch: str, from_branch: str
     sha = source.get("object", {}).get("sha")
     created = _github_request(token, "POST", f"/repos/{owner}/{repository}/git/refs", json={"ref": f"refs/heads/{branch}", "sha": sha})
     return {"branch": branch, "sha": created.get("object", {}).get("sha")}
+
+
+def ensure_branch_is_current(repository_url: str, token: str, branch: str, base_branch: str) -> None:
+    """Reject commits from a branch that has fallen behind the configured base branch."""
+    branch = _branch_name(branch)
+    base_branch = _branch_name(base_branch, "Base branch name")
+    if branch == base_branch:
+        return
+    owner, repository = _repository_parts(repository_url)
+    comparison = _github_request(token, "GET", f"/repos/{owner}/{repository}/compare/{base_branch}...{branch}")
+    if comparison.get("status") == "behind" or int(comparison.get("behind_by") or 0) > 0:
+        raise GitHubAuthorizationError("Pull the latest default branch into this branch before committing", 409)
 
 
 def commit_files(repository_url: str, token: str, branch: str, message: str, files: list[dict]) -> dict:

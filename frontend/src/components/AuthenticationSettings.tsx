@@ -1,7 +1,7 @@
-type Props = { clerkConfigured: boolean };
+type Props = { clerkConfigured: boolean; workspace?: { id: string } | null };
 import './AuthenticationSettings.css';
 import WorkspaceSettings from './WorkspaceSettings';
 
-export default function AuthenticationSettings({ clerkConfigured }: Props) {
-  return <WorkspaceSettings workspace={{ id: '' }} />;
+export default function AuthenticationSettings({ workspace }: Props) {
+  return <WorkspaceSettings workspace={{ id: workspace?.id || '' }} />;
 }

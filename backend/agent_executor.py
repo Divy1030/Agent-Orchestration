@@ -6,6 +6,7 @@ import os
 import json
 import re
 import time
+import asyncio
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -37,7 +38,10 @@ def _relative_date_guidance(now: datetime | None = None, timezone_name: str | No
 
 class OpenRouterExecutor:
     def __init__(self, api_key: str | None = None, model: str | None = None):
-        self.api_key = api_key or os.getenv("OPENROUTER_API_KEY", "")
+        # Provider credentials are supplied per workspace at execution time.
+        # Do not silently fall back to a process environment key: that could
+        # charge the platform account instead of the user's BYOK account.
+        self.api_key = api_key or ""
         self.model = model or os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
 
     async def execute(self, node: dict[str, Any], messages: list[dict[str, str]], *,
@@ -50,7 +54,7 @@ class OpenRouterExecutor:
         provider_key = api_key or self.api_key
         if not provider_key:
             if mcp_tools:
-                raise RuntimeError("MCP tool calls require OPENROUTER_API_KEY and a model that supports tool calling.")
+                raise RuntimeError("MCP tool calls require a configured workspace OpenRouter key and a model that supports tool calling.")
             latest_user_message = next((item.get("content", "").strip() for item in reversed(messages) if item.get("role") == "user"), "")
             mock_reply = f"I received your question: {latest_user_message}" if latest_user_message else fallback
             return {"reply": mock_reply or fallback, "provider": "mock_agent", "model": None, "latency_ms": 0, "fallback": True}
@@ -163,14 +167,23 @@ class OpenRouterExecutor:
                     if provider_tools:
                         body["tools"] = provider_tools
                         body["tool_choice"] = "auto"
-                    response = await client.post(
-                        "https://openrouter.ai/api/v1/chat/completions",
-                        headers={"Authorization": f"Bearer {provider_key}", "Content-Type": "application/json",
-                                 "HTTP-Referer": os.getenv("OPENROUTER_SITE_URL", "http://localhost:5173"),
-                                 "X-Title": os.getenv("OPENROUTER_SITE_NAME", "Agent Orchestration")},
-                        json=body,
-                    )
-                    response.raise_for_status()
+                    for provider_attempt in range(3):
+                        try:
+                            response = await client.post(
+                                "https://openrouter.ai/api/v1/chat/completions",
+                                headers={"Authorization": f"Bearer {provider_key}", "Content-Type": "application/json",
+                                         "HTTP-Referer": os.getenv("OPENROUTER_SITE_URL", "http://localhost:5173"),
+                                         "X-Title": os.getenv("OPENROUTER_SITE_NAME", "Agent Orchestration")},
+                                json=body,
+                            )
+                            response.raise_for_status()
+                            break
+                        except httpx.HTTPStatusError as provider_error:
+                            provider_text = provider_error.response.text.lower()
+                            transient_user_lookup = provider_error.response.status_code == 401 and "user not found" in provider_text
+                            if not transient_user_lookup or provider_attempt == 2:
+                                raise
+                            await asyncio.sleep(0.5 * (provider_attempt + 1))
                     raw = response.json()
                     usage = raw.get("usage", usage)
                     assistant_message = raw["choices"][0]["message"]
@@ -217,4 +230,20 @@ class OpenRouterExecutor:
                 return {"reply": fallback, "provider": "static_fallback", "model": body["model"],
                         "latency_ms": round((time.perf_counter() - started) * 1000, 1),
                         "fallback": True, "error": type(exc).__name__}
-            raise RuntimeError(f"Agent provider failed: {type(exc).__name__}") from exc
+            if isinstance(exc, httpx.HTTPStatusError):
+                response = exc.response
+                detail = ""
+                try:
+                    payload = response.json()
+                    if isinstance(payload, dict):
+                        error_payload = payload.get("error")
+                        if isinstance(error_payload, dict):
+                            detail = str(error_payload.get("message") or error_payload.get("code") or "")
+                        elif error_payload:
+                            detail = str(error_payload)
+                        detail = detail or str(payload.get("message") or "")
+                except (ValueError, TypeError):
+                    detail = ""
+                detail = detail or response.text[:500].strip() or response.reason_phrase
+                raise RuntimeError(f"Agent provider failed: OpenRouter HTTP {response.status_code} for model {body.get('model')}: {detail[:500]}") from exc
+            raise RuntimeError(f"Agent provider failed: {str(exc).strip() or type(exc).__name__}") from exc

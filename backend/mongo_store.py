@@ -23,6 +23,12 @@ SPACE_LIMITS = {
     "team": {"spaces": 100, "members": 250},
 }
 
+DEFAULT_GIT_SETTINGS = {
+    "pull_before_commit": True,
+    "require_branch_for_non_owners": True,
+    "require_pull_request_for_non_owners": True,
+}
+
 
 def hash_password(password: str) -> str:
     salt = secrets.token_bytes(16)
@@ -78,6 +84,7 @@ class MongoStore:
         self._db.space_memory.create_index([("workspace_id", 1), ("created_at", -1)])
         self._db.space_skills.create_index([("workspace_id", 1), ("name", 1)], unique=True)
         self._db.space_tasks.create_index([("workspace_id", 1), ("updated_at", -1)])
+        self._db.space_task_artifacts.create_index([("workspace_id", 1), ("task_id", 1), ("created_at", -1)])
         self._db.space_approvals.create_index([("workspace_id", 1), ("status", 1), ("created_at", -1)])
         self._db.space_agent_presence.create_index("workspace_id")
         self._db.flows.create_index([("workspace_id", 1), ("slug", 1)], unique=True)
@@ -478,10 +485,32 @@ class MongoStore:
         return [self._public_task(row) for row in self.db.space_tasks.find({"workspace_id": __import__("bson").ObjectId(workspace_id)}).sort("updated_at", -1).limit(100)]
 
     @staticmethod
-    def _public_task(row: dict[str, Any]) -> dict[str, Any]:
+    def _public_value(value: Any) -> Any:
+        """Convert Mongo-specific values nested in public task payloads."""
+        from bson import ObjectId
+
+        if isinstance(value, ObjectId):
+            return str(value)
+        if isinstance(value, dict):
+            return {key: MongoStore._public_value(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [MongoStore._public_value(item) for item in value]
+        if isinstance(value, tuple):
+            return [MongoStore._public_value(item) for item in value]
+        return value
+
+    def _public_task(self, row: dict[str, Any]) -> dict[str, Any]:
+        creator_name = "Unknown user"
+        creator_id = row.get("created_by")
+        if creator_id:
+            creator = self.db.users.find_one({"_id": creator_id}, {"name": 1, "email": 1}) or {}
+            creator_name = (creator.get("name") or creator.get("email", "").split("@", 1)[0] or creator_name).strip()
         return {"id": str(row["_id"]), "title": row.get("title", ""), "description": row.get("description", ""),
                 "status": row.get("status", "todo"), "priority": row.get("priority", "normal"),
+                "task_type": row.get("task_type", "code"), "depends_on": [str(item) for item in row.get("depends_on", [])],
                 "assignee_agent_id": str(row["assignee_agent_id"]) if row.get("assignee_agent_id") else None,
+                "created_by_name": creator_name,
+                "execution": MongoStore._public_value(row.get("execution", {"status": "idle"})),
                 "created_at": row.get("created_at"), "updated_at": row.get("updated_at")}
 
     def create_space_task(self, user_id: str, workspace_id: str, task: dict[str, Any]) -> dict[str, Any]:
@@ -489,17 +518,63 @@ class MongoStore:
         if not membership:
             raise PermissionError("Space access denied")
         from bson import ObjectId
+        task_type = task.get("task_type", "code")
+        if task_type == "code":
+            task_text = f"{task.get('title', '')} {task.get('description', '')}".lower()
+            for candidate, keywords in (("plan", ("plan", "design", "architect")), ("fix", ("fix", "bug", "repair", "issue")),
+                                         ("review", ("review", "audit")), ("test", ("test", "qa", "coverage")), ("security", ("security", "vulnerability", "auth"))):
+                if any(keyword in task_text for keyword in keywords):
+                    task_type = candidate
+                    break
+        role_by_type = {"plan": "planner", "code": "coder", "fix": "coder", "review": "reviewer", "test": "tester", "security": "security"}
         agent_id = ObjectId(task["assignee_agent_id"]) if task.get("assignee_agent_id") else None
+        if not agent_id:
+            preferred_role = role_by_type.get(task_type, "coder")
+            assignment = self.db.space_agents.find_one({"workspace_id": ObjectId(workspace_id), "role": preferred_role})
+            if not assignment:
+                assignment = self.db.space_agents.find_one({"workspace_id": ObjectId(workspace_id)})
+            agent_id = assignment.get("agent_id") if assignment else None
+        dependency_ids = []
+        for dependency in task.get("depends_on", []):
+            dependency_id = ObjectId(dependency)
+            if not self.db.space_tasks.find_one({"_id": dependency_id, "workspace_id": ObjectId(workspace_id)}):
+                raise ValueError("A selected task dependency was not found in this Space")
+            if dependency_id not in dependency_ids:
+                dependency_ids.append(dependency_id)
         if agent_id and not self.db.space_agents.find_one({"workspace_id": ObjectId(workspace_id), "agent_id": agent_id}):
             raise ValueError("The selected agent is not assigned to this Space")
         timestamp = now()
         row = {"workspace_id": ObjectId(workspace_id), "title": task["title"].strip(), "description": task.get("description", "").strip(),
-               "status": task.get("status", "todo"), "priority": task.get("priority", "normal"), "assignee_agent_id": agent_id,
+               "status": task.get("status", "todo"), "priority": task.get("priority", "normal"), "task_type": task_type,
+               "depends_on": dependency_ids, "assignee_agent_id": agent_id,
                "created_by": ObjectId(user_id), "created_at": timestamp, "updated_at": timestamp}
         result = self.db.space_tasks.insert_one(row)
         row["_id"] = result.inserted_id
         self.record_space_activity(workspace_id, "task_created", f"Task created: {row['title']}")
         return self._public_task(row)
+
+    def ready_space_tasks(self, user_id: str, workspace_id: str) -> list[dict[str, Any]]:
+        if not self.is_member(user_id, workspace_id):
+            raise PermissionError("Space access denied")
+        from bson import ObjectId
+        workspace_object_id = ObjectId(workspace_id)
+        rows = list(self.db.space_tasks.find({"workspace_id": workspace_object_id, "status": "todo"}))
+        role_by_type = {"plan": "planner", "code": "coder", "fix": "coder", "review": "reviewer", "test": "tester", "security": "security"}
+        ready = []
+        for row in rows:
+            if not row.get("assignee_agent_id"):
+                preferred_role = role_by_type.get(row.get("task_type", "code"), "coder")
+                assignment = self.db.space_agents.find_one({"workspace_id": workspace_object_id, "role": preferred_role})
+                if not assignment:
+                    assignment = self.db.space_agents.find_one({"workspace_id": workspace_object_id})
+                if assignment:
+                    row["assignee_agent_id"] = assignment["agent_id"]
+                    self.db.space_tasks.update_one({"_id": row["_id"]}, {"$set": {"assignee_agent_id": assignment["agent_id"], "updated_at": now()}})
+            dependencies = row.get("depends_on", [])
+            completed = self.db.space_tasks.count_documents({"_id": {"$in": dependencies}, "status": "done"})
+            if row.get("assignee_agent_id") and completed == len(dependencies):
+                ready.append(self._public_task(row))
+        return ready
 
     def update_space_task_status(self, user_id: str, workspace_id: str, task_id: str, status: str) -> dict[str, Any]:
         membership = self._space_membership(user_id, workspace_id)
@@ -512,6 +587,237 @@ class MongoStore:
         row = self.db.space_tasks.find_one({"_id": ObjectId(task_id)})
         self.record_space_activity(workspace_id, "task_updated", f"Task status changed: {row.get('title', '')} → {status}")
         return self._public_task(row)
+
+    def update_space_task(self, user_id: str, workspace_id: str, task_id: str, updates: dict[str, Any]) -> dict[str, Any]:
+        membership = self._space_membership(user_id, workspace_id)
+        if not membership:
+            raise PermissionError("Space access denied")
+        if set(updates) != {"status"} and not self._space_manager(membership):
+            raise PermissionError("Only Space owners and admins can edit tasks")
+        from bson import ObjectId
+        task_object_id = ObjectId(task_id)
+        current = self.db.space_tasks.find_one({"_id": task_object_id, "workspace_id": ObjectId(workspace_id)})
+        if not current:
+            raise ValueError("Task not found")
+        clean: dict[str, Any] = {}
+        if updates.get("title") is not None:
+            clean["title"] = str(updates["title"]).strip()
+        if updates.get("description") is not None:
+            clean["description"] = str(updates["description"]).strip()
+        for key in ("task_type", "priority", "status"):
+            if updates.get(key) is not None:
+                clean[key] = updates[key]
+        if "assignee_agent_id" in updates:
+            agent_id = updates.get("assignee_agent_id")
+            if agent_id:
+                agent_object_id = ObjectId(agent_id)
+                if not self.db.space_agents.find_one({"workspace_id": ObjectId(workspace_id), "agent_id": agent_object_id}):
+                    raise ValueError("The selected agent is not assigned to this Space")
+                clean["assignee_agent_id"] = agent_object_id
+            else:
+                # An empty selection means “auto assign”. Keep the manual
+                # override optional while still making new edits runnable.
+                role_by_type = {"plan": "planner", "code": "coder", "fix": "coder", "review": "reviewer", "test": "tester", "security": "security"}
+                preferred_role = role_by_type.get(updates.get("task_type", current.get("task_type", "code")), "coder")
+                assignment = self.db.space_agents.find_one({"workspace_id": ObjectId(workspace_id), "role": preferred_role})
+                if not assignment:
+                    assignment = self.db.space_agents.find_one({"workspace_id": ObjectId(workspace_id)})
+                clean["assignee_agent_id"] = assignment.get("agent_id") if assignment else None
+        if not clean:
+            return self._public_task(current)
+        clean["updated_at"] = now()
+        self.db.space_tasks.update_one({"_id": task_object_id}, {"$set": clean})
+        self.record_space_activity(workspace_id, "task_updated", f"Task edited: {clean.get('title', current.get('title', ''))}")
+        return self._public_task(self.db.space_tasks.find_one({"_id": task_object_id}))
+
+    def delete_space_task(self, user_id: str, workspace_id: str, task_id: str) -> None:
+        membership = self._space_membership(user_id, workspace_id)
+        if not self._space_manager(membership):
+            raise PermissionError("Only Space owners and admins can delete tasks")
+        from bson import ObjectId
+        task_object_id = ObjectId(task_id)
+        row = self.db.space_tasks.find_one({"_id": task_object_id, "workspace_id": ObjectId(workspace_id)})
+        if not row:
+            raise ValueError("Task not found")
+        if self.db.space_tasks.find_one({"workspace_id": ObjectId(workspace_id), "depends_on": task_object_id}):
+            raise ValueError("This task is a dependency for another task and cannot be deleted yet")
+        self.db.space_tasks.delete_one({"_id": task_object_id, "workspace_id": ObjectId(workspace_id)})
+        self.record_space_activity(workspace_id, "task_deleted", f"Task deleted: {row.get('title', '')}")
+
+    def claim_space_task(self, user_id: str, workspace_id: str, task_id: str) -> dict[str, Any]:
+        membership = self._space_membership(user_id, workspace_id)
+        if not membership:
+            raise PermissionError("Space access denied")
+        from bson import ObjectId
+        from pymongo import ReturnDocument
+        task_object_id = ObjectId(task_id)
+        timestamp = now()
+        dependency_row = self.db.space_tasks.find_one({"_id": task_object_id, "workspace_id": ObjectId(workspace_id)}, {"depends_on": 1})
+        dependencies = (dependency_row or {}).get("depends_on", [])
+        if dependencies and self.db.space_tasks.count_documents({"_id": {"$in": dependencies}, "status": "done"}) != len(dependencies):
+            raise ValueError("This task is waiting for its dependent tasks to finish")
+        row = self.db.space_tasks.find_one_and_update(
+            {"_id": task_object_id, "workspace_id": ObjectId(workspace_id), "status": "todo",
+             "assignee_agent_id": {"$ne": None}},
+            {"$set": {"status": "in_progress", "updated_at": timestamp,
+                       "execution": {"status": "running", "phase": "queued", "heartbeat_at": timestamp, "started_at": timestamp, "started_by": ObjectId(user_id)}}},
+            return_document=ReturnDocument.AFTER,
+        )
+        if not row:
+            existing = self.db.space_tasks.find_one({"_id": task_object_id, "workspace_id": ObjectId(workspace_id)})
+            if not existing:
+                raise ValueError("Task not found")
+            if not existing.get("assignee_agent_id"):
+                raise ValueError("Assign an agent before starting this task")
+            dependencies = existing.get("depends_on", [])
+            if dependencies and self.db.space_tasks.count_documents({"_id": {"$in": dependencies}, "status": "done"}) != len(dependencies):
+                raise ValueError("This task is waiting for its dependent tasks to finish")
+            raise ValueError("Task is already running or has been completed")
+        self.record_space_activity(workspace_id, "task_started", f"Agent started task: {row.get('title', '')}", str(row["assignee_agent_id"]))
+        self.set_agent_presence(workspace_id, str(row["assignee_agent_id"]), "working")
+        return self._public_task(row)
+
+    def update_space_task_phase(self, workspace_id: str, task_id: str, phase: str) -> None:
+        from bson import ObjectId
+        self.db.space_tasks.update_one(
+            {"_id": ObjectId(task_id), "workspace_id": ObjectId(workspace_id), "status": "in_progress"},
+            {"$set": {"execution.phase": phase[:60], "execution.heartbeat_at": now(), "updated_at": now()}},
+        )
+
+    def reset_running_space_tasks(self, user_id: str, workspace_id: str) -> int:
+        membership = self._space_membership(user_id, workspace_id)
+        if not self._space_manager(membership):
+            raise PermissionError("Only Space owners and admins can reset running tasks")
+        from bson import ObjectId
+        rows = list(self.db.space_tasks.find({"workspace_id": ObjectId(workspace_id), "status": "in_progress"}, {"_id": 1, "title": 1, "assignee_agent_id": 1}))
+        timestamp = now()
+        for row in rows:
+            self.db.space_tasks.update_one({"_id": row["_id"]}, {"$set": {
+                "status": "todo", "updated_at": timestamp,
+                "execution": {"status": "failed", "phase": "reset", "finished_at": timestamp,
+                               "error": "Task was reset because its worker was no longer active."},
+            }})
+            if row.get("assignee_agent_id"):
+                self.set_agent_presence(workspace_id, str(row["assignee_agent_id"]), "idle")
+            self.record_space_activity(workspace_id, "task_reset", f"Task reset for retry: {row.get('title', '')}", str(row.get("assignee_agent_id")) if row.get("assignee_agent_id") else None)
+        return len(rows)
+
+    def finish_space_task(self, workspace_id: str, task_id: str, result: dict[str, Any]) -> dict[str, Any]:
+        from bson import ObjectId
+        timestamp = now()
+        self.db.space_tasks.update_one({"_id": ObjectId(task_id), "workspace_id": ObjectId(workspace_id), "status": "in_progress"},
+                                       {"$set": {"status": "review", "updated_at": timestamp,
+                                                  "execution": {"status": "completed", "finished_at": timestamp, "result": result}}})
+        row = self.db.space_tasks.find_one({"_id": ObjectId(task_id), "workspace_id": ObjectId(workspace_id)})
+        self.record_space_activity(workspace_id, "task_ready_for_review", f"Agent finished task: {row.get('title', '')}", str(row.get("assignee_agent_id")))
+        if row and row.get("assignee_agent_id"):
+            self.set_agent_presence(workspace_id, str(row["assignee_agent_id"]), "idle")
+        return self._public_task(row)
+
+    def fail_space_task(self, workspace_id: str, task_id: str, error: str) -> dict[str, Any]:
+        from bson import ObjectId
+        timestamp = now()
+        self.db.space_tasks.update_one({"_id": ObjectId(task_id), "workspace_id": ObjectId(workspace_id), "status": "in_progress"},
+                                       {"$set": {"status": "todo", "updated_at": timestamp,
+                                                  "execution": {"status": "failed", "finished_at": timestamp, "error": error[:1000]}}})
+        row = self.db.space_tasks.find_one({"_id": ObjectId(task_id), "workspace_id": ObjectId(workspace_id)})
+        self.record_space_activity(workspace_id, "task_failed", f"Agent task failed: {row.get('title', '')}", str(row.get("assignee_agent_id")))
+        if row and row.get("assignee_agent_id"):
+            self.set_agent_presence(workspace_id, str(row["assignee_agent_id"]), "idle")
+        return self._public_task(row)
+
+    def space_task_for_user(self, user_id: str, workspace_id: str, task_id: str) -> dict[str, Any]:
+        if not self.is_member(user_id, workspace_id):
+            raise PermissionError("Space access denied")
+        from bson import ObjectId
+        row = self.db.space_tasks.find_one({"_id": ObjectId(task_id), "workspace_id": ObjectId(workspace_id)})
+        if not row:
+            raise ValueError("Task not found")
+        return self._public_task(row)
+
+    def add_space_task_artifact(self, workspace_id: str, task_id: str, artifact_type: str,
+                                content: str, metadata: dict[str, Any] | None = None,
+                                created_by: str | None = None) -> dict[str, Any]:
+        from bson import ObjectId
+        clean_content = str(content or "")[:120_000]
+        row = {"workspace_id": ObjectId(workspace_id), "task_id": ObjectId(task_id),
+               "artifact_type": artifact_type[:40], "content": clean_content,
+               "metadata": self._public_value(metadata or {}), "created_at": now()}
+        if created_by:
+            row["created_by"] = ObjectId(created_by)
+        result = self.db.space_task_artifacts.insert_one(row)
+        row["_id"] = result.inserted_id
+        return {"id": str(row["_id"]), "task_id": task_id, "artifact_type": row["artifact_type"],
+                "content": row["content"], "metadata": row["metadata"], "created_at": row["created_at"]}
+
+    def space_task_artifacts(self, user_id: str, workspace_id: str, task_id: str) -> list[dict[str, Any]]:
+        from bson import ObjectId
+        if not self.is_member(user_id, workspace_id):
+            raise PermissionError("Space access denied")
+        rows = self.db.space_task_artifacts.find({"workspace_id": ObjectId(workspace_id), "task_id": ObjectId(task_id)}).sort("created_at", 1)
+        return [{"id": str(row["_id"]), "task_id": str(row["task_id"]), "artifact_type": row.get("artifact_type", ""),
+                 "content": row.get("content", ""), "metadata": self._public_value(row.get("metadata", {})),
+                 "created_at": row.get("created_at")} for row in rows]
+
+    def dependency_artifacts(self, workspace_id: str, task: dict[str, Any]) -> list[dict[str, Any]]:
+        from bson import ObjectId
+        dependency_ids = task.get("depends_on", [])
+        if not dependency_ids:
+            return []
+        rows = self.db.space_task_artifacts.find({"workspace_id": ObjectId(workspace_id), "task_id": {"$in": dependency_ids}}).sort("created_at", 1)
+        return [{"artifact_type": row.get("artifact_type", ""), "content": row.get("content", "")[:120_000],
+                 "metadata": self._public_value(row.get("metadata", {}))} for row in rows]
+
+    def set_space_task_branch(self, workspace_id: str, task_id: str, branch: str, sha: str | None = None) -> dict[str, Any]:
+        from bson import ObjectId
+        row = self.db.space_tasks.find_one({"_id": ObjectId(task_id), "workspace_id": ObjectId(workspace_id)})
+        if not row:
+            raise ValueError("Task not found")
+        execution = dict(row.get("execution") or {})
+        execution.update({"branch": branch, "branch_sha": sha, "handoff_status": "branch_ready"})
+        self.db.space_tasks.update_one({"_id": row["_id"]}, {"$set": {"execution": execution, "updated_at": now()}})
+        self.record_space_activity(workspace_id, "task_branch_ready", f"Branch prepared for task: {row.get('title', '')}", str(row.get("assignee_agent_id")))
+        updated = self.db.space_tasks.find_one({"_id": row["_id"]})
+        return self._public_task(updated)
+
+    def set_space_task_pull_request(self, workspace_id: str, task_id: str, pull_request: dict[str, Any]) -> dict[str, Any]:
+        from bson import ObjectId
+        row = self.db.space_tasks.find_one({"_id": ObjectId(task_id), "workspace_id": ObjectId(workspace_id)})
+        if not row:
+            raise ValueError("Task not found")
+        execution = dict(row.get("execution") or {})
+        execution.update({"pull_request": self._public_value(pull_request), "handoff_status": "pull_request_open"})
+        self.db.space_tasks.update_one({"_id": row["_id"]}, {"$set": {"execution": execution, "updated_at": now()}})
+        self.record_space_activity(workspace_id, "task_pull_request_opened", f"Pull request opened for task: {row.get('title', '')}", str(row.get("assignee_agent_id")))
+        updated = self.db.space_tasks.find_one({"_id": row["_id"]})
+        return self._public_task(updated)
+
+    def set_space_task_commit(self, workspace_id: str, task_id: str, commit: dict[str, Any]) -> dict[str, Any]:
+        from bson import ObjectId
+        row = self.db.space_tasks.find_one({"_id": ObjectId(task_id), "workspace_id": ObjectId(workspace_id)})
+        if not row:
+            raise ValueError("Task not found")
+        execution = dict(row.get("execution") or {})
+        execution.update({"commit": self._public_value(commit), "handoff_status": "proposal_applied", "proposal_status": "applied"})
+        self.db.space_tasks.update_one({"_id": row["_id"]}, {"$set": {"execution": execution, "updated_at": now()}})
+        self.record_space_activity(workspace_id, "task_proposal_applied", f"Approved agent changes applied: {row.get('title', '')}", str(row.get("assignee_agent_id")))
+        updated = self.db.space_tasks.find_one({"_id": row["_id"]})
+        return self._public_task(updated)
+
+    def reject_space_task_proposal(self, user_id: str, workspace_id: str, task_id: str, reason: str) -> dict[str, Any]:
+        membership = self._space_membership(user_id, workspace_id)
+        if not self._space_manager(membership):
+            raise PermissionError("Only Space owners and admins can reject proposals")
+        from bson import ObjectId
+        row = self.db.space_tasks.find_one({"_id": ObjectId(task_id), "workspace_id": ObjectId(workspace_id)})
+        if not row:
+            raise ValueError("Task not found")
+        execution = dict(row.get("execution") or {})
+        execution.update({"handoff_status": "proposal_rejected", "proposal_status": "rejected", "proposal_rejection_reason": reason[:1000]})
+        self.db.space_tasks.update_one({"_id": row["_id"]}, {"$set": {"execution": execution, "updated_at": now()}})
+        self.record_space_activity(workspace_id, "task_proposal_rejected", f"Agent proposal rejected: {row.get('title', '')}", str(row.get("assignee_agent_id")))
+        updated = self.db.space_tasks.find_one({"_id": row["_id"]})
+        return self._public_task(updated)
 
     def space_approvals(self, user_id: str, workspace_id: str) -> list[dict[str, Any]]:
         if not self.is_member(user_id, workspace_id):
@@ -559,7 +865,7 @@ class MongoStore:
         detail = self.space_detail(user_id, workspace_id)
         agents = self.space_agents(user_id, workspace_id)
         events = []
-        for row in self.db.space_activity.find({"workspace_id": ObjectId(workspace_id)}).sort("created_at", -1).limit(30):
+        for row in self.db.space_activity.find({"workspace_id": ObjectId(workspace_id)}).sort("created_at", -1).limit(1):
             events.append({"id": str(row["_id"]), "type": row.get("event_type"), "message": row.get("message", ""),
                            "agent_id": str(row["agent_id"]) if row.get("agent_id") else None, "created_at": row.get("created_at")})
         working = any(agent.get("status") == "working" for agent in agents)
@@ -641,8 +947,10 @@ class MongoStore:
             raise PermissionError("Only Space owners and admins can connect a project")
         if not repository_url.startswith("https://github.com/"):
             raise ValueError("Only GitHub repository URLs are supported")
+        existing = self.db.space_projects.find_one({"workspace_id": ObjectId(workspace_id)}, {"git_settings": 1}) or {}
         project = {"workspace_id": ObjectId(workspace_id), "provider": "github", "repository_url": repository_url.rstrip("/"),
-                   "default_branch": default_branch.strip() or "main", "connection_status": "awaiting_github_authorization", "updated_at": now()}
+                   "default_branch": default_branch.strip() or "main", "git_settings": {**DEFAULT_GIT_SETTINGS, **(existing.get("git_settings") or {})},
+                   "connection_status": "awaiting_github_authorization", "updated_at": now()}
         self.db.space_projects.update_one({"workspace_id": ObjectId(workspace_id)}, {
             "$set": project,
             "$unset": {"github_token_encrypted": "", "github_scopes": "", "github_full_name": "",
@@ -652,6 +960,29 @@ class MongoStore:
         }, upsert=True)
         project.pop("workspace_id", None)
         return self._public_space_project(project) or {}
+
+    def space_project_settings(self, user_id: str, workspace_id: str) -> dict[str, Any]:
+        from bson import ObjectId
+        detail = self.space_detail(user_id, workspace_id)
+        if detail.get("role") != "owner":
+            raise PermissionError("Only the Space owner can view project Git settings")
+        project = detail.get("project") or {}
+        settings = {**DEFAULT_GIT_SETTINGS, **(project.get("git_settings") or {})}
+        return {"default_branch": project.get("default_branch") or "main", **settings}
+
+    def update_space_project_settings(self, user_id: str, workspace_id: str, settings: dict[str, Any]) -> dict[str, Any]:
+        from bson import ObjectId
+        workspace = self.db.workspaces.find_one({"_id": ObjectId(workspace_id), "owner_id": ObjectId(user_id)})
+        project = self.db.space_projects.find_one({"workspace_id": ObjectId(workspace_id)})
+        if not workspace:
+            raise PermissionError("Only the Space owner can change project Git settings")
+        if not project:
+            raise ValueError("Save and authorize a GitHub repository before changing project settings")
+        clean = {"default_branch": settings.get("default_branch", "main").strip() or "main",
+                 "git_settings": {key: bool(settings.get(key, default)) for key, default in DEFAULT_GIT_SETTINGS.items()},
+                 "updated_at": now()}
+        self.db.space_projects.update_one({"_id": project["_id"]}, {"$set": clean})
+        return self.space_project_settings(user_id, workspace_id)
 
     def authorize_space_github(self, user_id: str, workspace_id: str, encrypted_token: str,
                                repository: dict[str, Any], scopes: list[str]) -> dict[str, Any]:
