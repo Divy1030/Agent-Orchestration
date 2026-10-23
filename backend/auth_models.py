@@ -110,6 +110,11 @@ class SpaceTaskRejectProposalRequest(BaseModel):
     reason: str = Field(default="", max_length=1000)
 
 
+class SpaceTaskReviewCloseRequest(BaseModel):
+    outcome: str = Field(default="resolved", pattern=r"^(accepted|rejected|superseded|no_changes|resolved)$")
+    note: str = Field(default="", max_length=1000)
+
+
 class SpaceApprovalRequest(BaseModel):
     action_type: str = Field(min_length=1, max_length=80)
     title: str = Field(min_length=1, max_length=180)

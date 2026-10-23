@@ -2892,6 +2892,10 @@
 .project-review-criteria { padding: 14px 22px; border-bottom: 1px solid #34415a; }
 .project-review-criteria strong, .project-review-tests > strong { color: #e8edf7; font-size: 11px; }
 .project-review-criteria p { margin: 7px 0 0; color: #b9c6d9; font-size: 12px; line-height: 1.5; white-space: pre-wrap; }
+.project-review-plan { padding: 14px 22px; border-bottom: 1px solid #34415a; background: #182131; }
+.project-review-plan-heading { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 10px; color: #e8edf7; font-size: 11px; }
+.project-review-plan-heading span { color: #9f8ced; font-size: 10px; text-transform: uppercase; letter-spacing: .05em; }
+.project-review-plan .task-output-content, .project-review-plan > div:not(.project-review-plan-heading) { color: #c9d3e4; font-size: 12px; line-height: 1.55; }
 .project-review-diff { border-bottom: 1px solid #34415a; }
 .project-review-diff-heading { display: flex; justify-content: space-between; padding: 12px 22px; color: #dbe3f1; font-size: 11px; }
 .project-review-diff-heading span { color: #718097; }
@@ -3095,7 +3099,8 @@
 .task-batch-controls strong { color: #e8edf8; font-size: 13px; letter-spacing: .02em; }
 .task-batch-controls small { font-size: 11px; line-height: 1.45; max-width: 520px; }
 .task-batch-actions button { min-width: 132px; }
-.task-add-only { display: flex; grid-column: 1 / -1; justify-content: flex-end; margin: 0 0 14px; width: 100%; }
+.task-add-only { display: flex; grid-column: 1 / -1; justify-content: flex-end; align-items: center; gap: 12px; margin: 0 0 14px; width: 100%; }
+.task-clear-button { color: #ef9a9a; }
 .task-delete-strip { align-items: flex-start; display: flex; gap: 18px; grid-column: 1 / -1; justify-content: space-between; }
 .task-delete-strip small { color: var(--muted-text); display: block; font-size: 11px; margin-top: 4px; }
 .task-delete-list { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }

@@ -22,7 +22,7 @@ from backend.auth_models import (FlowSaveRequest, GitHubBranchRequest, GitHubCom
                                   SpaceContextRequest,
                                   SpaceMemoryRequest, SpaceSkillRequest, SpaceTaskRequest, SpaceTaskStatusRequest,
                                   SpaceTaskBranchRequest, SpaceTaskPullRequestRequest, SpaceTaskApplyProposalRequest, SpaceApprovalRequest,
-                                  SpaceTaskRejectProposalRequest, SpaceTaskBatchRequest, SpaceTaskAdvanceRequest, SpaceTaskUpdateRequest,
+                                  SpaceTaskRejectProposalRequest, SpaceTaskReviewCloseRequest, SpaceTaskBatchRequest, SpaceTaskAdvanceRequest, SpaceTaskUpdateRequest,
                                   SpaceAgentRequest, SpaceAgentRoleRequest, SpaceJoinCodeRequest, SpaceJoinRequest, SpaceMemberRoleRequest,
                                   SpaceProjectRequest, SpaceProjectSettingsRequest, WorkspaceRequest)
 from backend.mongo_store import MongoRuntimeStore, MongoStore, now as mongo_store_now, verify_password
@@ -149,6 +149,14 @@ async def run_space_task(space_id: str, task_id: str, user_id: str) -> None:
         assignment = mongo.db.space_agents.find_one({"workspace_id": ObjectId(space_id), "agent_id": task["assignee_agent_id"]})
         role = (assignment or {}).get("role", "coder")
         branch = (task.get("execution") or {}).get("branch")
+        if not branch:
+            parent_id = (task.get("pipeline") or {}).get("parent_task_id")
+            if parent_id:
+                parent = mongo.db.space_tasks.find_one({"_id": parent_id, "workspace_id": ObjectId(space_id)}, {"execution.branch": 1, "execution.branch_sha": 1})
+                parent_execution = (parent or {}).get("execution") or {}
+                if parent_execution.get("branch"):
+                    branch = parent_execution["branch"]
+                    mongo.set_space_task_branch(space_id, task_id, branch, parent_execution.get("branch_sha"))
         try:
             token, project = mongo.github_token_for_space(user_id, space_id)
             if not branch:
@@ -170,7 +178,7 @@ Task title: {task.get('title', '')}
 Task description: {task.get('description', '') or 'No additional description was provided.'}
 Priority: {task.get('priority', 'normal')}
 
-Use the shared project memory, skills, patterns, open tasks, repository snapshot, and predecessor artifacts below as context. The repository snapshot is pinned to one commit SHA; do not assume files changed outside it. Do not claim that code was changed, committed, or pushed. For planning tasks, produce a structured plan with files, reasons, dependencies, acceptance criteria, and verification. For implementation tasks, when you can safely specify the exact text, include proposed file changes in this exact JSON shape inside a fenced json block: {{"summary":"...","files":[{{"path":"safe/relative/path","content":"complete UTF-8 file content"}}],"verification":["..."]}}. For test or review tasks, report concrete findings and verification results. Only include complete files you are confident should change; never include secrets, credentials, binary data, or paths outside the repository.
+Use the shared project memory, skills, patterns, open tasks, repository snapshot, and predecessor artifacts below as context. The repository snapshot is pinned to one commit SHA; do not assume files changed outside it. Do not claim that code was changed, committed, or pushed. For planning tasks, produce only a structured plan: summary, files to change, reason for each file, dependencies, acceptance criteria, risks, and verification steps. Do not output code, fenced JSON file proposals, or complete file contents. For coder or fix tasks, return one complete file edit per changed file using this exact format: `FILE: safe/relative/path.ext` followed by a fenced code block containing the complete UTF-8 replacement file content. Do not return a prose plan instead. You may use the equivalent fenced JSON shape: {{"summary":"...","files":[{{"path":"safe/relative/path","content":"complete UTF-8 file content"}}],"verification":["..."]}}. For tester tasks, do not propose code; report verification and end with exactly one line `TEST_STATUS: PASS` or `TEST_STATUS: FAIL`. For reviewer tasks, report findings and a recommendation only. Only include complete files for coder/fix tasks; never include secrets, credentials, binary data, or paths outside the repository.
 
 Shared context:
 {shared_context}
@@ -180,6 +188,11 @@ Repository context (server-fetched, bounded, and pinned):
 
 Artifacts produced by predecessor tasks:
 {artifact_context}
+
+FINAL ROLE INSTRUCTION — this task is assigned to the {role.upper()} role.
+If your role is CODER or FIX, do not write another plan and do not describe what a planner should do. Inspect the supplied repository context and return the actual implementation proposal as one complete fenced `json` object with `summary`, `files`, and `verification`. Every item in `files` must contain the complete replacement content for a real repository-relative file. If you cannot safely provide complete file contents, state the blocker clearly instead of returning a plan.
+If your role is TESTER, do not write code or a plan; report verification and finish with `TEST_STATUS: PASS` or `TEST_STATUS: FAIL`.
+If your role is PLANNER or THINKER, return a plan only and never include file contents.
 """
         mongo.update_space_task_phase(space_id, task_id, "calling_model")
         mongo.record_space_task_event(space_id, task_id, "context_ready", "Repository context and predecessor artifacts loaded")
@@ -190,7 +203,11 @@ Artifacts produced by predecessor tasks:
                                      [{"role": "user", "content": prompt}])
         reply = result.get("reply", "")
         mongo.update_space_task_phase(space_id, task_id, "saving_result")
-        proposal = extract_agent_proposal(reply)
+        # Only implementation roles can create file proposals. Planning,
+        # testing, and review responses remain human-reviewable artifacts.
+        proposal = extract_agent_proposal(reply) if role in {"coder", "fix"} else None
+        if not proposal and role in {"coder", "fix"}:
+            proposal = extract_agent_file_blocks(reply)
         proposed_files = [item.get("path") for item in (proposal or {}).get("files", []) if item.get("path")]
         mongo.record_space_task_event(space_id, task_id, "proposal_ready", f"Agent produced {len(proposed_files)} proposed file change(s)", files=proposed_files)
         output_status = "complete" if proposal or role in {"planner", "tester", "reviewer"} else "unstructured"
@@ -209,8 +226,11 @@ Artifacts produced by predecessor tasks:
                 mongo.record_space_task_event(space_id, task_id, "branch_updated", "Isolated task branch updated", files=proposed_files)
         tests = []
         if role == "tester":
-            tests = [{"name": "Agent verification", "status": "reported", "details": reply[:1000]}]
+            import re
+            test_status = "passed" if re.search(r"TEST_STATUS:\s*PASS\b", reply, re.IGNORECASE) else ("failed" if re.search(r"TEST_STATUS:\s*FAIL\b", reply, re.IGNORECASE) else "reported")
+            tests = [{"name": "Agent verification", "status": test_status, "details": reply[:1000]}]
             mongo.record_space_task_event(space_id, task_id, "tests_reported", "Tester reported verification results", tests=tests)
+            mongo.db.space_tasks.update_one({"_id": __import__("bson").ObjectId(task_id), "workspace_id": __import__("bson").ObjectId(space_id)}, {"$set": {"execution.test_status": test_status}})
         artifact_type = "plan" if role == "planner" or task.get("task_type") == "plan" else ("test" if role == "tester" or task.get("task_type") == "test" else ("review" if role == "reviewer" or task.get("task_type") == "review" else "implementation"))
         mongo.add_space_task_artifact(space_id, task_id, artifact_type, reply,
                                       {"role": role, "branch": repository_context.get("branch"), "branch_sha": repository_context.get("branch_sha"),
@@ -220,7 +240,9 @@ Artifacts produced by predecessor tasks:
             from bson import ObjectId
             project = mongo.db.space_projects.find_one({"workspace_id": ObjectId(space_id)}, {"git_settings": 1}) or {}
             project_settings = {"auto_proceed": (project.get("git_settings") or {}).get("auto_proceed", True)}
-        if project_settings.get("auto_proceed", True):
+        # Plans and reviews are deliberate gates. They must be accepted by a
+        # human before a coder or the next role is started.
+        if project_settings.get("auto_proceed", True) and role not in {"planner", "thinker", "reviewer"}:
             try:
                 next_task = mongo.advance_space_task(user_id, space_id, task_id, "auto", system=True)
                 mongo.claim_space_task(user_id, space_id, next_task["id"])
@@ -307,12 +329,15 @@ def extract_agent_proposal(reply: str) -> dict[str, Any] | None:
     """Accept only a bounded, repository-relative proposal from the agent output."""
     import json
     import re
-    match = re.search(r"```json\s*(\{.*?\})\s*```", reply or "", re.DOTALL | re.IGNORECASE)
+    match = re.search(r"```json\s*", reply or "", re.IGNORECASE)
     if not match:
         return None
     try:
-        payload = json.loads(match.group(1))
-    except json.JSONDecodeError:
+        start = (reply or "").find("{", match.end())
+        if start < 0:
+            return None
+        payload, _ = json.JSONDecoder().raw_decode((reply or "")[start:])
+    except (json.JSONDecodeError, TypeError):
         return None
     files = payload.get("files") if isinstance(payload, dict) else None
     if not isinstance(files, list) or not files or len(files) > 20:
@@ -330,6 +355,36 @@ def extract_agent_proposal(reply: str) -> dict[str, Any] | None:
         clean_files.append({"path": path, "content": content})
     return {"summary": str(payload.get("summary", ""))[:2000], "files": clean_files, "status": "pending",
             "verification": [str(item)[:500] for item in payload.get("verification", [])[:20]] if isinstance(payload.get("verification", []), list) else []}
+
+
+def extract_agent_file_blocks(reply: str) -> dict[str, Any] | None:
+    """Normalize IDE-style named fenced files into a safe multi-file proposal."""
+    import re
+    patterns = [
+        re.compile(r"(?:^|\n)\s*FILE:\s*`?([^`\s]+)`?\s*\n\s*```[^\n]*\n(.*?)```", re.IGNORECASE | re.DOTALL),
+        re.compile(r"```[^\n]*(?:path|file|filename)\s*=\s*[`'\"]?([^`'\"\s]+)[`'\"]?[^\n]*\n(.*?)```", re.IGNORECASE | re.DOTALL),
+        re.compile(r"<file\s+path\s*=\s*[\"']([^\"']+)[\"']\s*>(.*?)</file>", re.IGNORECASE | re.DOTALL),
+        re.compile(r"(?:^|\n)\s*(?:#{1,6}\s*)?`?([^`\s]+\.[A-Za-z0-9]+)`?\s*\n\s*```[^\n]*\n(.*?)```", re.IGNORECASE | re.DOTALL),
+    ]
+    matches: list[tuple[str, str]] = []
+    for pattern in patterns:
+        matches.extend(pattern.findall(reply or ""))
+    clean_files: list[dict[str, str]] = []
+    seen: set[str] = set()
+    total_bytes = 0
+    for raw_path, content in matches:
+        path = str(raw_path).strip().lstrip("/")
+        if path in seen or not path or ".." in path.split("/") or path.startswith(".git/"):
+            continue
+        encoded_size = len(content.encode("utf-8"))
+        if encoded_size > 250_000 or total_bytes + encoded_size > 1_000_000:
+            return None
+        seen.add(path)
+        total_bytes += encoded_size
+        clean_files.append({"path": path, "content": content.rstrip("\n")})
+    if not clean_files or len(clean_files) > 20:
+        return None
+    return {"summary": "Normalized coder file edits", "files": clean_files, "status": "pending", "verification": []}
 
 
 def _tool_matches_message(tool: dict[str, Any], message: str) -> bool:
@@ -791,6 +846,16 @@ def delete_space_task(space_id: str, task_id: str, http_request: Request) -> dic
         raise HTTPException(409, str(exc)) from exc
 
 
+@app.post("/api/spaces/{space_id}/tasks/clear")
+def clear_space_tasks(space_id: str, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        count = mongo.clear_space_tasks(user["id"], space_id)
+        return {"cleared_count": count, "message": f"Cleared {count} task(s) and their artifacts."}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+
+
 @app.post("/api/spaces/{space_id}/tasks/{task_id}/start", status_code=202)
 def start_space_task(space_id: str, task_id: str, background_tasks: BackgroundTasks, http_request: Request) -> dict[str, Any]:
     user = current_user(http_request)
@@ -917,6 +982,28 @@ def reject_space_task_proposal(space_id: str, task_id: str, request: SpaceTaskRe
     user = current_user(http_request)
     try:
         return {"task": mongo.reject_space_task_proposal(user["id"], space_id, task_id, request.reason.strip())}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/spaces/{space_id}/tasks/{task_id}/retry")
+def retry_space_task(space_id: str, task_id: str, request: SpaceTaskRejectProposalRequest, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        return {"task": mongo.retry_space_task(user["id"], space_id, task_id, request.reason.strip())}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/spaces/{space_id}/tasks/{task_id}/close-review")
+def close_space_task_review(space_id: str, task_id: str, request: SpaceTaskReviewCloseRequest, http_request: Request) -> dict[str, Any]:
+    user = current_user(http_request)
+    try:
+        return {"task": mongo.close_space_task_review(user["id"], space_id, task_id, request.outcome, request.note)}
     except PermissionError as exc:
         raise HTTPException(403, str(exc)) from exc
     except ValueError as exc:

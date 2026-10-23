@@ -646,6 +646,24 @@ class MongoStore:
         self.db.space_tasks.delete_one({"_id": task_object_id, "workspace_id": ObjectId(workspace_id)})
         self.record_space_activity(workspace_id, "task_deleted", f"Task deleted: {row.get('title', '')}")
 
+    def clear_space_tasks(self, user_id: str, workspace_id: str) -> int:
+        """Remove the Space task queue and its artifacts for a fresh run."""
+        membership = self._space_membership(user_id, workspace_id)
+        if not self._space_manager(membership):
+            raise PermissionError("Only Space owners and admins can clear the task queue")
+        from bson import ObjectId
+        workspace_object_id = ObjectId(workspace_id)
+        rows = list(self.db.space_tasks.find({"workspace_id": workspace_object_id}, {"_id": 1, "assignee_agent_id": 1}))
+        task_ids = [row["_id"] for row in rows]
+        if task_ids:
+            self.db.space_task_artifacts.delete_many({"workspace_id": workspace_object_id, "task_id": {"$in": task_ids}})
+            self.db.space_tasks.delete_many({"workspace_id": workspace_object_id, "_id": {"$in": task_ids}})
+        for row in rows:
+            if row.get("assignee_agent_id"):
+                self.set_agent_presence(workspace_id, str(row["assignee_agent_id"]), "idle")
+        self.record_space_activity(workspace_id, "task_queue_cleared", f"Task queue cleared for a fresh run ({len(rows)} task(s))")
+        return len(rows)
+
     def claim_space_task(self, user_id: str, workspace_id: str, task_id: str) -> dict[str, Any]:
         membership = self._space_membership(user_id, workspace_id)
         if not membership:
@@ -813,11 +831,16 @@ class MongoStore:
             raise ValueError(f"No available {next_role} agent is assigned to this Space")
         task_type = {"planner": "plan", "coder": "code", "tester": "test", "reviewer": "review", "security": "security"}[next_role]
         timestamp = now()
+        parent_execution = dict(task.get("execution") or {})
+        inherited_execution = {}
+        if parent_execution.get("branch"):
+            inherited_execution = {"branch": parent_execution.get("branch"), "branch_sha": parent_execution.get("branch_sha"),
+                                    "handoff_status": "branch_inherited", "status": "idle", "phase": "queued"}
         next_task = {"workspace_id": ObjectId(workspace_id), "title": f"{task.get('title', 'Task')} · {next_role.title()}",
                      "description": f"Continue the pipeline from '{task.get('title', '')}'. Use the predecessor task artifacts, repository branch, acceptance criteria, and verification results.",
                      "status": "todo", "priority": task.get("priority", "normal"), "task_type": task_type,
                      "depends_on": [task_object_id], "assignee_agent_id": assignment["agent_id"], "created_by": ObjectId(user_id),
-                     "pipeline": {"mode": mode, "parent_task_id": task_object_id, "role": next_role}, "created_at": timestamp, "updated_at": timestamp}
+                     "execution": inherited_execution, "pipeline": {"mode": mode, "parent_task_id": task_object_id, "role": next_role}, "created_at": timestamp, "updated_at": timestamp}
         result = self.db.space_tasks.insert_one(next_task)
         next_task["_id"] = result.inserted_id
         self.db.space_tasks.update_one({"_id": task_object_id}, {"$set": {"status": "done", "execution.handoff": {"mode": mode, "next_task_id": result.inserted_id}, "updated_at": timestamp}})
@@ -874,6 +897,38 @@ class MongoStore:
         self.record_space_activity(workspace_id, "task_proposal_rejected", f"Agent proposal rejected: {row.get('title', '')}", str(row.get("assignee_agent_id")))
         updated = self.db.space_tasks.find_one({"_id": row["_id"]})
         return self._public_task(updated)
+
+    def close_space_task_review(self, user_id: str, workspace_id: str, task_id: str, outcome: str, note: str = "") -> dict[str, Any]:
+        membership = self._space_membership(user_id, workspace_id)
+        if not self._space_manager(membership):
+            raise PermissionError("Only Space owners and admins can close reviews")
+        from bson import ObjectId
+        row = self.db.space_tasks.find_one({"_id": ObjectId(task_id), "workspace_id": ObjectId(workspace_id)})
+        if not row:
+            raise ValueError("Task not found")
+        execution = dict(row.get("execution") or {})
+        execution.update({"review_status": "closed", "review_outcome": outcome, "review_note": note[:1000], "review_closed_at": now()})
+        update: dict[str, Any] = {"execution": execution, "updated_at": now()}
+        if row.get("status") == "review":
+            update["status"] = "done"
+        self.db.space_tasks.update_one({"_id": row["_id"]}, {"$set": update})
+        self.record_space_activity(workspace_id, "task_review_closed", f"Review closed ({outcome}): {row.get('title', '')}", str(row.get("assignee_agent_id")) if row.get("assignee_agent_id") else None)
+        return self._public_task(self.db.space_tasks.find_one({"_id": row["_id"]}))
+
+    def retry_space_task(self, user_id: str, workspace_id: str, task_id: str, reason: str = "") -> dict[str, Any]:
+        membership = self._space_membership(user_id, workspace_id)
+        if not self._space_manager(membership):
+            raise PermissionError("Only Space owners and admins can retry agent tasks")
+        from bson import ObjectId
+        row = self.db.space_tasks.find_one({"_id": ObjectId(task_id), "workspace_id": ObjectId(workspace_id)})
+        if not row:
+            raise ValueError("Task not found")
+        execution = dict(row.get("execution") or {})
+        execution.update({"status": "idle", "phase": "queued", "error": None, "proposal_status": "retry_requested",
+                          "retry_reason": reason[:1000], "finished_at": None})
+        self.db.space_tasks.update_one({"_id": row["_id"]}, {"$set": {"status": "todo", "execution": execution, "updated_at": now()}})
+        self.record_space_activity(workspace_id, "task_retry_requested", f"Retry requested: {row.get('title', '')}", str(row.get("assignee_agent_id")) if row.get("assignee_agent_id") else None)
+        return self._public_task(self.db.space_tasks.find_one({"_id": row["_id"]}))
 
     def space_approvals(self, user_id: str, workspace_id: str) -> list[dict[str, Any]]:
         if not self.is_member(user_id, workspace_id):
